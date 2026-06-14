@@ -1,0 +1,149 @@
+//! Bot meta-commands: `!`-prefixed messages the bot answers directly, without
+//! a model turn. Parsing and formatting are pure (tested here); the runtime
+//! and environment gathering lives in the read loop.
+
+/// A recognized command — the whole trimmed message (after the mention is
+/// stripped) beginning with `!`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Command {
+    /// `!providers` — the active providers (an API key is set).
+    Providers,
+    /// `!models` — `provider/model` for the active providers.
+    Models,
+    /// `!help` — the available commands.
+    Help,
+    /// `!model` (show the current model) or `!model <provider/model>` (set it
+    /// for this conversation). Owner-only.
+    Model(Option<String>),
+    /// `!forget` — reset this conversation (history + model override).
+    /// Owner-only.
+    Forget,
+    /// `!<name>` that isn't recognized.
+    Unknown(String),
+}
+
+/// Parse `text` (the message, mention already stripped) as a command. A command
+/// is the whole trimmed text starting with `!`, named by its first word.
+/// Returns `None` for ordinary text (no `!` prefix, or a bare `!`).
+pub fn parse(text: &str) -> Option<Command> {
+    let rest = text.trim().strip_prefix('!')?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("");
+    let arg = parts.next().unwrap_or("").trim();
+    match name {
+        "" => None,
+        "providers" => Some(Command::Providers),
+        "models" => Some(Command::Models),
+        "help" => Some(Command::Help),
+        "model" => Some(Command::Model((!arg.is_empty()).then(|| arg.to_string()))),
+        "forget" => Some(Command::Forget),
+        other => Some(Command::Unknown(other.to_string())),
+    }
+}
+
+// Renderers emit standard Markdown (`**bold**`, `-` bullets, `` `code` ``); the
+// runtime turns it into Slack Block Kit via `render::to_blocks` before posting.
+
+/// The active providers (those with an API key), one per line.
+pub fn render_providers(active: &[&str]) -> String {
+    if active.is_empty() {
+        return "No active providers — set a provider API key (e.g. ANTHROPIC_API_KEY).".into();
+    }
+    let mut out = String::from("**Active providers:**\n");
+    for id in active {
+        out.push_str(&format!("- {id}\n"));
+    }
+    out.trim_end().to_string()
+}
+
+/// The available `provider/model` rows.
+pub fn render_models(rows: &[(&str, &str)]) -> String {
+    if rows.is_empty() {
+        return "No models available — no active providers.".into();
+    }
+    let mut out = String::from("**Available models:**\n");
+    for (provider, model) in rows {
+        out.push_str(&format!("- {provider}/{model}\n"));
+    }
+    out.trim_end().to_string()
+}
+
+/// The list of commands.
+pub fn render_help() -> String {
+    "**Commands:**\n\
+     - `!providers` — active providers\n\
+     - `!models` — available provider/model\n\
+     - `!model [provider/model]` — show or set this conversation's model (creator only)\n\
+     - `!forget` — reset this conversation (creator only)\n\
+     - `!help` — this list"
+        .into()
+}
+
+/// The reply for an unrecognized `!<name>`.
+pub fn render_unknown(name: &str) -> String {
+    format!("Unknown command: `!{name}`. Try `!help`.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_recognizes_the_commands() {
+        assert_eq!(parse("!providers"), Some(Command::Providers));
+        assert_eq!(parse("!models"), Some(Command::Models));
+        assert_eq!(parse("!help"), Some(Command::Help));
+    }
+
+    #[test]
+    fn parse_trims_and_takes_the_first_word() {
+        assert_eq!(parse("   !providers  "), Some(Command::Providers));
+        assert_eq!(parse("!models please"), Some(Command::Models), "extra args ignored");
+    }
+
+    #[test]
+    fn parse_returns_unknown_for_an_unrecognized_bang() {
+        assert_eq!(parse("!frobnicate"), Some(Command::Unknown("frobnicate".into())));
+    }
+
+    #[test]
+    fn parse_captures_the_model_argument_and_forget() {
+        assert_eq!(parse("!model"), Some(Command::Model(None)));
+        assert_eq!(
+            parse("!model anthropic/claude-x"),
+            Some(Command::Model(Some("anthropic/claude-x".into())))
+        );
+        assert_eq!(parse("!forget"), Some(Command::Forget));
+    }
+
+    #[test]
+    fn parse_is_none_for_ordinary_text() {
+        assert_eq!(parse("hello there"), None);
+        assert_eq!(parse("what about !providers"), None, "mid-prose is not a command");
+        assert_eq!(parse("!"), None, "a bare bang is not a command");
+        assert_eq!(parse("   "), None);
+    }
+
+    #[test]
+    fn render_providers_lists_or_explains_empty() {
+        let out = render_providers(&["anthropic", "openai"]);
+        assert!(out.contains("anthropic") && out.contains("openai"), "{out}");
+        assert!(out.contains("- anthropic"), "standard-markdown bullets: {out}");
+        assert!(out.starts_with("**Active providers:**"), "standard-markdown bold: {out}");
+        assert!(render_providers(&[]).contains("No active providers"));
+    }
+
+    #[test]
+    fn render_models_lists_provider_slash_model_or_explains_empty() {
+        let out = render_models(&[("anthropic", "claude-opus-4-8")]);
+        assert!(out.contains("- anthropic/claude-opus-4-8"), "{out}");
+        assert!(render_models(&[]).contains("No models"));
+    }
+
+    #[test]
+    fn render_help_lists_the_commands() {
+        let out = render_help();
+        assert!(out.contains("!providers") && out.contains("!models") && out.contains("!help"));
+        assert!(out.contains("- `!providers`"), "standard-markdown list + inline code: {out}");
+    }
+}

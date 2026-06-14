@@ -1,0 +1,81 @@
+# tapir-bot config reference. The binary reads this file and splits it: the
+# neutral tables ([agent], [storage], [sandbox]) feed the engine
+# (tapir-bot-core), and the Slack tables ([reactions], [access]) feed the Slack
+# backend (tapir-bot-slack). A different backend would bring its own tables.
+# A key unknown *within* a table is an error, so a typo fails loudly. Every
+# table is optional and defaults — an empty file is a valid, text-only,
+# deny-everything bot.
+
+# ============================ Neutral (tapir-bot-core) ============================
+
+# The runtime's model settings. The whole table is optional; the defaults are
+# shown. The provider's API key is read from the environment (e.g.
+# ANTHROPIC_API_KEY), never from this file.
+[agent]
+# The tapir provider id: anthropic, openai, google, ...
+provider = "anthropic"
+# The model id. Omit to use the catalog's default model for the provider.
+# model = "claude-..."
+# An optional standing system prompt prepended to every turn.
+# system_prompt = "You are Tapir, a concise Slack assistant."
+# How the agent's tools execute. The gate for tool use:
+#   none    — text-only, no tools run anywhere (the default)
+#   host    — tools run in the bot's own process (the pod), using local
+#             exec/fs ops. For a hardened/containerized (e.g. Kubernetes)
+#             deployment, where the pod is the isolation boundary.
+#   sandbox — tools run in an isolated per-channel container (the [sandbox]
+#             block below). Needs docker or podman.
+tools = "none"
+
+# Where the bot persists conversation history (under <dir>/sessions) and the
+# MEMORY.md facts files. This holds conversation content — place it
+# accordingly. Defaults to tapir-bot-data in the working directory.
+[storage]
+dir = "tapir-bot-data"
+# Where the MEMORY.md facts live (the global MEMORY.md and memory/<channel>.md).
+# Omit to keep them under `dir`; point it at an existing notes directory to
+# store facts elsewhere.
+# memory_dir = "/path/to/notes"
+
+# The tool sandbox — read only when [agent].tools = "sandbox". The agent runs
+# tools inside an isolated per-channel container. Needs docker or podman. Build
+# the repo Dockerfile (`docker build -t tapir-bot-sandbox .`) for an image with
+# the CLIs.
+[sandbox]
+image = "alpine:3.20"      # or "tapir-bot-sandbox" once built
+memory = "1g"
+cpus = "2"
+pids = 256
+# network = "none"         # default is the runtime bridge (egress on)
+idle_minutes = 30
+# Env var names passed from the bot's process into the container (values via
+# the bot's environment, never argv) — e.g. provider/scenario settings.
+# env = ["AWS_PROFILE", "AWS_REGION", "EKS_CLUSTER"]
+
+# ========================= Slack backend (tapir-bot-slack) =========================
+
+# Access policy. Deny-by-default: with no [access] table, the bot answers
+# nobody. List the channels it serves and the users who may DM it. (The access
+# *mechanism* is reusable across backends; the config value is Slack's.)
+[access]
+# Whether bot-authored messages may trigger turns (off by default), and the
+# per-thread cap on bot-triggered turns that breaks bot-to-bot loops.
+allow_bots = false
+bot_turn_limit = 3
+
+# Who may DM the bot (stable user ids). Empty → no one.
+[access.dm]
+users = []
+
+# Allowlisted channels (by id). Everyone in a listed channel may mention the
+# bot; add `users` to restrict to specific people.
+# [access.channels.C0123456789]
+# [access.channels.C9876543210]
+# users = ["U0123456789"]
+
+# The lifecycle reaction emojis (Slack short names, no colons). Set any to an
+# empty string to disable that reaction. Defaults shown.
+[reactions]
+seen = "eyes"               # while the turn is handled
+done = "white_check_mark"   # on success
+failed = "x"                # on failure

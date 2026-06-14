@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["tapir-bot-core", "tapir-bot-slack", "tapir-bot"]
+
+# Each crate sets its own `version` for independent releases (see RELEASING.md);
+# only the shared, stable metadata lives here.
+[workspace.package]
+edition = "2024"
+license = "ISC"
+repository = "https://github.com/tapir-dev/tapir-bot"
+
+[workspace.dependencies]
+# The crates in this workspace, referenced by path so a sibling crate builds
+# against the local checkout.
+tapir-bot-core = { path = "tapir-bot-core", version = "0.1.0" }
+tapir-bot-slack = { path = "tapir-bot-slack", version = "0.1.0" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+# JSON for the Slack Web API payloads and Block Kit rendering.
+serde_json = "1.0"
+# Config file parsing (tapir-bot.toml) and per-conversation metadata.
+toml = "1.0"
+# HTTP for the Slack Web API (async). rustls keeps the TLS stack pure.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Async runtime for the bot's Socket Mode loop.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+# The Socket Mode WebSocket; rustls roots match reqwest's TLS choice.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# Stream/Sink extension traits for the WebSocket loop.
+futures = "0.3"
+# Structured runtime logging. The subscriber is the binary's concern, so only
+# the `tracing` facade lives in the libraries.
+tracing = "0.1"
+# The subscriber — a binary/example concern (RUST_LOG filtering), not a library
+# dependency.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# CommonMark + GFM-tables parser; mapped to Slack Block Kit. default-features
+# off drops the bundled binary's getopts/html.
+pulldown-cmark = { version = "0.13.4", default-features = false }
+# The agent SDK: provider-neutral LLM layer + turn engine. Path dependency on
+# the sibling checkout, so the bot needs ../tapir to build.
+tapir = { path = "../tapir/tapir" }
+# The docker/podman sandbox tools run in (ExecOps/FsOps over a container).
+tapir-sandbox = { path = "../tapir-sandbox" }
+# Host uid/gid, so the sandbox container runs as the host user (workspace files
+# stay host-owned, not root).
+libc = "0.2"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

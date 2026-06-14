@@ -1,0 +1,5 @@
+target
+# Runtime data: conversation transcripts and MEMORY.md facts. Holds
+# conversation content — never commit it.
+tapir-bot-data/
+tapir-bot-dev-data/

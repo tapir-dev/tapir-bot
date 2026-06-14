@@ -1,0 +1,31 @@
+[package]
+name = "tapir-bot"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Facade for building Slack (and other) bots on the tapir agent SDK: a config-driven Bot builder."
+
+[lib]
+name = "tapir_bot"
+
+[features]
+default = ["slack"]
+# Re-export the Slack backend so a bot can `use tapir_bot::slack::SlackBackend`.
+slack = ["dep:tapir-bot-slack"]
+
+[dependencies]
+tapir-bot-core.workspace = true
+tapir-bot-slack = { workspace = true, optional = true }
+anyhow.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+# The `slack_bot` example needs a tracing subscriber and a config format (the
+# library no longer picks one) — it reads a TOML file itself.
+tracing-subscriber.workspace = true
+toml.workspace = true
+
+[[example]]
+name = "slack_bot"
+required-features = ["slack"]

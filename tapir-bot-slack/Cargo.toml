@@ -1,0 +1,27 @@
+[package]
+name = "tapir-bot-slack"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Slack backend for tapir-bot: Socket Mode runtime, Web API client, and Block Kit rendering."
+
+[lib]
+name = "tapir_bot_slack"
+
+[dependencies]
+tapir-bot-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures.workspace = true
+tracing.workspace = true
+pulldown-cmark.workspace = true
+
+[dev-dependencies]
+# SlackConfig tests deserialize TOML fixtures.
+toml.workspace = true
