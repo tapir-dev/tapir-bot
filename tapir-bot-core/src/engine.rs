@@ -16,7 +16,9 @@ use crate::access::{Access, LoopGuard};
 use crate::backend::ReplySink;
 use crate::config::{Config, ToolMode};
 use crate::event::Inbound;
-use crate::tools::{HostTools, Tools, build_sandbox_manager};
+#[cfg(feature = "sandbox")]
+use crate::tools::build_sandbox_manager;
+use crate::tools::{HostTools, Tools};
 use crate::{commands, memory, meta};
 
 /// The resolved model settings a turn runs on.
@@ -64,11 +66,17 @@ impl Engine {
         let repo_skills = skills_dir.filter(|p| p.is_dir());
         let skills_notice = repo_skills.as_deref().and_then(crate::tools::skills_notice);
         let tools = match config.agent.tools {
+            ToolMode::Host => Tools::Host(Arc::new(HostTools::new(&data_dir, repo_skills))),
+            ToolMode::None => Tools::None,
+            #[cfg(feature = "sandbox")]
             ToolMode::Sandbox => {
                 Tools::Sandbox(build_sandbox_manager(&config.sandbox, &data_dir, repo_skills))
             }
-            ToolMode::Host => Tools::Host(Arc::new(HostTools::new(&data_dir, repo_skills))),
-            ToolMode::None => Tools::None,
+            #[cfg(not(feature = "sandbox"))]
+            ToolMode::Sandbox => anyhow::bail!(
+                "[agent].tools = \"sandbox\" needs the `sandbox` feature; \
+                 rebuild tapir-bot with --features sandbox"
+            ),
         };
 
         // Conversation history persists under <data_dir>/sessions, replayed per
@@ -85,6 +93,7 @@ impl Engine {
         let tools_mode = match self.tools {
             Tools::None => "none",
             Tools::Host(_) => "host",
+            #[cfg(feature = "sandbox")]
             Tools::Sandbox(_) => "sandbox",
         };
         tracing::info!(
@@ -95,6 +104,7 @@ impl Engine {
             tools = %tools_mode,
             "agent configured"
         );
+        #[cfg(feature = "sandbox")]
         if let Tools::Sandbox(manager) = &self.tools {
             let manager = manager.clone();
             tracing::info!("tool sandbox enabled");
@@ -353,8 +363,9 @@ impl Engine {
         // the channel's prepared workspace. Tool-aware prompt when tools are on.
         let cwd = match &self.tools {
             Tools::None => std::path::PathBuf::from("."),
-            Tools::Sandbox(_) => std::path::PathBuf::from(tapir_sandbox::GUEST_WORKSPACE),
             Tools::Host(_) => host_turn.as_ref().expect("host turn prepared").1.clone(),
+            #[cfg(feature = "sandbox")]
+            Tools::Sandbox(_) => std::path::PathBuf::from(tapir_sandbox::GUEST_WORKSPACE),
         };
         let mut opts = SessionOptions::new(cwd)
             .prompt(prompt_spec_for(tools_enabled, system, self.skills_notice.as_deref()));
@@ -371,9 +382,11 @@ impl Engine {
         agent.set_model(Some(ModelRef { provider: provider.to_string(), id: model.to_string() }));
 
         // Sandbox mode: point the agent's tools at the channel's container and
-        // keep it from being reaped for the turn. Host mode keeps the runtime's
-        // default local ops (tools run in the pod); the lock guard in
-        // `host_turn` is held until the function returns. Text-only has none.
+        // keep it from being reaped for the turn (the `_busy` guard lives until
+        // the function returns). Host mode keeps the runtime's default local ops
+        // (tools run in the pod); its lock guard in `host_turn` is held the same
+        // way. Text-only has neither.
+        #[cfg(feature = "sandbox")]
         let _busy = match &self.tools {
             Tools::Sandbox(manager) => {
                 let handle = manager.channel(channel);

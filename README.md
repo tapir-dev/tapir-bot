@@ -94,10 +94,22 @@ just test         # run the test suite
 just deny         # lint the dependency graph (cargo-deny)
 ```
 
-The bot links two sibling crates by path — the agent SDK
-([`../tapir`](https://github.com/tapir-dev/tapir)) and the container sandbox
-([`../tapir-sandbox`](https://github.com/tapir-dev/tapir-sandbox), which backs
-`[agent].tools = "sandbox"`) — so those checkouts must be present to build.
+The bot links the agent SDK ([`../tapir`](https://github.com/tapir-dev/tapir))
+by path, so that checkout must be present to build.
+
+### Cargo features
+
+- `slack` *(default)* — the Slack backend (`tapir_bot::slack`).
+- `sandbox` — the container tool mode (`[agent].tools = "sandbox"`), backed by
+  [`tapir-sandbox`](https://github.com/tapir-dev/tapir-sandbox). **Off by
+  default**: the base bot is text-only/host and pulls no docker/podman stack.
+  Enable it (and check out `../tapir-sandbox`) to use it:
+
+  ```toml
+  tapir-bot = { git = "...", features = ["sandbox"] }
+  ```
+
+  Without it, `[agent].tools = "sandbox"` fails at startup with a clear error.
 
 Releasing is GitHub-only and also driven through `just`; see
 [RELEASING.md](RELEASING.md).

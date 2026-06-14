@@ -1,11 +1,10 @@
 //! How a turn's tools execute, backend-neutral: text-only, in the bot's own
-//! process (host), or in an isolated per-channel container (sandbox). Also the
-//! skills provisioning shared by host and sandbox, and the skills notice the
-//! engine appends to a tool-aware prompt.
+//! process (host), or — behind the `sandbox` feature — in an isolated
+//! per-channel container. Also the skills provisioning shared by host and
+//! sandbox, and the skills notice the engine appends to a tool-aware prompt.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 
@@ -16,7 +15,8 @@ pub enum Tools {
     /// Tools run in the bot's own process at a per-channel workspace (the pod
     /// is the isolation boundary).
     Host(Arc<HostTools>),
-    /// Tools run in the channel's isolated container.
+    /// Tools run in the channel's isolated container (the `sandbox` feature).
+    #[cfg(feature = "sandbox")]
     Sandbox(Arc<tapir_sandbox::SandboxManager>),
 }
 
@@ -109,12 +109,16 @@ pub fn skills_notice(skills_dir: &std::path::Path) -> Option<String> {
 /// (but does not start) one container per channel, rooted at
 /// `<data_dir>/sandboxes/<channel>/workspace` — the only path that persists —
 /// and provisions skills into `<workspace>/skills` (repo skills, then
-/// `<data_dir>/skills/<channel>` overrides on top).
+/// `<data_dir>/skills/<channel>` overrides on top). Requires the `sandbox`
+/// feature.
+#[cfg(feature = "sandbox")]
 pub fn build_sandbox_manager(
     cfg: &crate::config::Sandbox,
     data_dir: &std::path::Path,
     repo_skills: Option<std::path::PathBuf>,
 ) -> Arc<tapir_sandbox::SandboxManager> {
+    use std::time::Duration;
+
     use tapir_sandbox::{DockerSandbox, LifecyclePolicy, Sandbox, SandboxConfig, SandboxManager, SystemClock};
 
     let policy = LifecyclePolicy {

@@ -13,5 +13,6 @@ and this project adheres to
 - Initial release of the backend-neutral bot engine: the neutral config
   (`agent`/`storage`/`sandbox`), the turn lifecycle, conversation memory and
   `MEMORY.md` facts, the `!`-commands, the reusable access policy
-  (`Access`/`LoopGuard`), tool execution (text-only/host/sandbox) with skills,
-  and the `ChatBackend` / `ReplySink` extension points.
+  (`Access`/`LoopGuard`), tool execution (text-only/host, plus a container
+  sandbox behind the off-by-default `sandbox` feature) with skills, and the
+  `ChatBackend` / `ReplySink` extension points.

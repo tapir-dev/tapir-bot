@@ -13,4 +13,5 @@ and this project adheres to
 - Initial release of the facade: the config-driven `Bot` builder that builds the
   engine from a `Config` and runs it on a `ChatBackend`, re-exporting
   `tapir-bot-core` and (behind the default `slack` feature) the Slack backend.
-  Ships a runnable `slack_bot` example.
+  The container sandbox tool mode is behind the off-by-default `sandbox`
+  feature. Ships a runnable `slack_bot` example.

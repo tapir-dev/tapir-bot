@@ -24,7 +24,8 @@ provider = "anthropic"
 #             exec/fs ops. For a hardened/containerized (e.g. Kubernetes)
 #             deployment, where the pod is the isolation boundary.
 #   sandbox — tools run in an isolated per-channel container (the [sandbox]
-#             block below). Needs docker or podman.
+#             block below). Needs docker or podman, and the bot must be built
+#             with the `sandbox` cargo feature (off by default).
 tools = "none"
 
 # Where the bot persists conversation history (under <dir>/sessions) and the

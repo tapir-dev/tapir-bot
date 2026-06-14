@@ -13,6 +13,9 @@ name = "tapir_bot"
 default = ["slack"]
 # Re-export the Slack backend so a bot can `use tapir_bot::slack::SlackBackend`.
 slack = ["dep:tapir-bot-slack"]
+# The container sandbox tool mode (`[agent].tools = "sandbox"`); pulls in the
+# docker/podman stack via tapir-sandbox. Off by default.
+sandbox = ["tapir-bot-core/sandbox"]
 
 [dependencies]
 tapir-bot-core.workspace = true

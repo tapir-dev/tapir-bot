@@ -134,8 +134,9 @@ Dependencies (each justified in the Cargo.toml comments):
 - `tracing` — runtime logging (the subscriber is the binary's concern).
 - `pulldown-cmark` — Markdown parsing for the Block Kit renderer.
 - `tapir` (path `../tapir/tapir`) — the agent SDK.
-- `tapir-sandbox` (path) — the per-channel container backend.
-- `libc` — the host uid/gid for sandbox file ownership.
+- `tapir-sandbox` (path) + `libc` — the per-channel container backend and the
+  host uid/gid for its file ownership. **Optional**, behind the off-by-default
+  `sandbox` feature; the base bot (text-only/host) pulls neither.
 
 ### Config schema
 
@@ -422,7 +423,9 @@ The agent gains real tools. How they execute is gated by `[agent].tools`:
   account, mounted secrets, `~/.aws`), not from `[sandbox].env`/`<data_dir>/aws`.
 - `sandbox` — tools run in an **isolated per-channel container**
   (`tapir-sandbox`: docker/podman, cap-drop, `no-new-privileges`, mem/cpu/pids
-  limits), configured by `[sandbox]`.
+  limits), configured by `[sandbox]`. Compiled only with the off-by-default
+  **`sandbox` cargo feature**; without it, selecting this mode errors at startup
+  (the base bot pulls no docker/podman stack).
 
 Shipped (phases A–B):
 

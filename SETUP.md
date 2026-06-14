@@ -186,7 +186,10 @@ failed = "x"                # on failure (default ❌)
 - `sandbox` — tools run in an **isolated per-channel container** (needs docker
   or podman), configured by the `[sandbox]` table. Build the repo `Dockerfile`
   (`docker build -t tapir-bot-sandbox .`) for an image with the CLIs and set
-  `[sandbox].image` to it.
+  `[sandbox].image` to it. This mode is behind the off-by-default **`sandbox`
+  cargo feature** — build the bot with `--features sandbox` (or
+  `features = ["sandbox"]` on the dependency), or it fails at startup with a
+  clear error.
 
 In `host`/`sandbox` the agent gains tools and can use **skills** (`skills/`,
 `SKILL.md` + scripts) provisioned into its per-channel workspace. See

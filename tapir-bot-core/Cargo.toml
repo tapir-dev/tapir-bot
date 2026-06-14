@@ -9,6 +9,12 @@ description = "Backend-neutral bot engine: turn lifecycle, access policy, memory
 [lib]
 name = "tapir_bot_core"
 
+[features]
+# The container sandbox tool mode (`[agent].tools = "sandbox"`). Off by default:
+# the base engine is text-only/host and pulls no docker/podman stack. Enable it
+# to compile the per-channel container backend (tapir-sandbox).
+sandbox = ["dep:tapir-sandbox", "dep:libc"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -17,5 +23,6 @@ toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tapir.workspace = true
-tapir-sandbox.workspace = true
-libc.workspace = true
+# Only compiled with the `sandbox` feature.
+tapir-sandbox = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
