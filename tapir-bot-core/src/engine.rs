@@ -283,7 +283,14 @@ impl Engine {
                     .collect();
                 commands::render_models(&refs)
             }
-            "help" => commands::render_help(&self.help),
+            "help" => {
+                // List registered commands too, in a stable (sorted) order.
+                let mut specs: Vec<commands::CommandSpec> =
+                    self.commands.values().map(|handler| handler.spec()).collect();
+                specs.sort_by(|a, b| a.name.cmp(&b.name));
+                commands::render_help(&self.help, &specs)
+            }
+            "skills" => commands::render_skills(&self.skills),
             "model" => {
                 self.handle_model(inbound, (!arg.is_empty()).then(|| arg.to_string())).await?
             }

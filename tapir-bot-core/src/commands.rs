@@ -97,6 +97,7 @@ struct Builtin {
 const BUILTINS: &[Builtin] = &[
     Builtin { name: "providers", command: "!providers", description: "active providers" },
     Builtin { name: "models", command: "!models", description: "available provider/model" },
+    Builtin { name: "skills", command: "!skills", description: "the available skills" },
     Builtin {
         name: "model",
         command: "!model [provider/model]",
@@ -109,7 +110,7 @@ const BUILTINS: &[Builtin] = &[
 /// The list of commands. Built-ins whose name is in `help.hide` are omitted, and
 /// `help.extra` rows are appended — so a consumer can tailor the `!help` table
 /// without the library knowing its commands.
-pub fn render_help(help: &crate::config::Help) -> String {
+pub fn render_help(help: &crate::config::Help, registered: &[CommandSpec]) -> String {
     let mut out = String::from("**Commands:**");
     for builtin in BUILTINS {
         if help.hide.iter().any(|h| h == builtin.name) {
@@ -117,8 +118,35 @@ pub fn render_help(help: &crate::config::Help) -> String {
         }
         out.push_str(&format!("\n- `{}` — {}", builtin.command, builtin.description));
     }
+    for spec in registered {
+        let command = match &spec.args {
+            Some(args) => format!("!{} {args}", spec.name),
+            None => format!("!{}", spec.name),
+        };
+        out.push_str(&format!("\n- `{command}` — {}", spec.description));
+    }
     for row in &help.extra {
         out.push_str(&format!("\n- `{}` — {}", row.command, row.description));
+    }
+    out
+}
+
+/// The skills as a GFM table (`Skill | Description`), the name showing `<args>`
+/// when the skill declares them. The Slack backend renders it as a Block Kit
+/// table; the name is wrapped in backticks so an `<arg>` placeholder stays
+/// literal.
+pub fn render_skills(skills: &[Skill]) -> String {
+    if skills.is_empty() {
+        return "No skills available.".into();
+    }
+    let mut out = String::from("| Skill | Description |\n| --- | --- |");
+    for skill in skills {
+        let name = match &skill.args {
+            Some(args) => format!("`{} {args}`", skill.name),
+            None => format!("`{}`", skill.name),
+        };
+        let description = skill.description.as_deref().unwrap_or("");
+        out.push_str(&format!("\n| {name} | {description} |"));
     }
     out
 }
@@ -211,9 +239,9 @@ mod tests {
 
     #[test]
     fn render_help_lists_the_builtins_by_default() {
-        let out = render_help(&crate::config::Help::default());
+        let out = render_help(&crate::config::Help::default(), &[]);
         assert!(out.contains("!providers") && out.contains("!models") && out.contains("!help"));
-        assert!(out.contains("!model") && out.contains("!forget"));
+        assert!(out.contains("!model") && out.contains("!forget") && out.contains("!skills"));
         assert!(out.contains("- `!providers`"), "standard-markdown list + inline code: {out}");
     }
 
@@ -226,11 +254,44 @@ mod tests {
                 description: "show the build version".into(),
             }],
         };
-        let out = render_help(&help);
+        let out = render_help(&help, &[]);
         // `!model` shares a prefix with `!models`, so match its unique row text.
         assert!(!out.contains("[provider/model]"), "hidden !model is gone: {out}");
         assert!(!out.contains("!forget"), "hidden !forget is gone: {out}");
         assert!(out.contains("!providers") && out.contains("!models"), "kept built-ins: {out}");
         assert!(out.contains("- `!version` — show the build version"), "extra row appended: {out}");
+    }
+
+    #[test]
+    fn render_help_lists_registered_commands() {
+        let registered = [
+            CommandSpec { name: "version".into(), args: None, description: "build version".into() },
+            CommandSpec {
+                name: "deploy".into(),
+                args: Some("<env>".into()),
+                description: "deploy".into(),
+            },
+        ];
+        let out = render_help(&crate::config::Help::default(), &registered);
+        assert!(out.contains("- `!version` — build version"), "{out}");
+        assert!(out.contains("- `!deploy <env>` — deploy"), "args shown: {out}");
+    }
+
+    #[test]
+    fn render_skills_is_a_table_with_optional_args() {
+        use crate::tools::Skill;
+        let skills = [
+            Skill {
+                name: "shortcut".into(),
+                description: Some("board".into()),
+                args: Some("<comando>".into()),
+            },
+            Skill { name: "plain".into(), description: Some("does a thing".into()), args: None },
+        ];
+        let out = render_skills(&skills);
+        assert!(out.starts_with("| Skill | Description |\n| --- | --- |"), "{out}");
+        assert!(out.contains("| `shortcut <comando>` | board |"), "name with args: {out}");
+        assert!(out.contains("| `plain` | does a thing |"), "name without args: {out}");
+        assert_eq!(render_skills(&[]), "No skills available.");
     }
 }
