@@ -55,7 +55,14 @@ impl Client {
         text: &str,
         blocks: Option<&[Value]>,
     ) -> anyhow::Result<String> {
-        let mut body = json!({ "channel": channel, "thread_ts": thread_ts, "text": text });
+        let mut body = json!({ "channel": channel, "text": text });
+        // An empty thread roots the message (Slack rejects a blank thread_ts), so
+        // only thread it when a parent is given.
+        if !thread_ts.is_empty()
+            && let Some(map) = body.as_object_mut()
+        {
+            map.insert("thread_ts".into(), json!(thread_ts));
+        }
         with_blocks(&mut body, blocks);
         let value = self.call("chat.postMessage", &self.bot_token, body).await?;
         value
@@ -63,6 +70,22 @@ impl Client {
             .and_then(Value::as_str)
             .map(String::from)
             .context("chat.postMessage response missing ts")
+    }
+
+    /// Post an ephemeral message visible only to `user` in `channel`
+    /// (`chat.postEphemeral`). Used for the access-denied reply. Needs the bot
+    /// to be in the channel (always true for a DM).
+    pub async fn post_ephemeral(
+        &self,
+        channel: &str,
+        user: &str,
+        text: &str,
+        blocks: Option<&[Value]>,
+    ) -> anyhow::Result<()> {
+        let mut body = json!({ "channel": channel, "user": user, "text": text });
+        with_blocks(&mut body, blocks);
+        self.call("chat.postEphemeral", &self.bot_token, body).await?;
+        Ok(())
     }
 
     /// Replace a previously posted message (the streaming edit). `text` is the

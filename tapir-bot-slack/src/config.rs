@@ -18,6 +18,19 @@ pub struct SlackConfig {
     pub reactions: Reactions,
     /// Who may make the bot take a turn, where (deny-by-default).
     pub access: Access,
+    /// The optional reply sent to a non-allowed user who addresses the bot.
+    pub denial: Denial,
+}
+
+/// The access-denied reply. Optional: with no `message`, a denied user who
+/// addresses the bot is met with silence (the default). With a `message`, that
+/// styled text is sent to them — ephemerally, falling back to a DM — so they
+/// learn why nothing happened.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Denial {
+    /// Markdown sent to a denied user. `None` (the default) sends nothing.
+    pub message: Option<String>,
 }
 
 /// The lifecycle reaction emojis (Slack short names, no colons). An empty
@@ -88,6 +101,28 @@ mod tests {
         assert!(config.access.allow_bots);
         assert_eq!(config.access.dm.users, vec!["U1"]);
         assert!(config.access.channels.contains_key("C0AAA"));
+    }
+
+    #[test]
+    fn denial_defaults_to_no_message() {
+        let config = toml::from_str::<SlackConfig>("").unwrap();
+        assert!(config.denial.message.is_none(), "silent by default");
+    }
+
+    #[test]
+    fn denial_parses_a_message() {
+        let config = toml::from_str::<SlackConfig>(
+            "[denial]\nmessage = \"Desculpe, não falo com estranhos.\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.denial.message.as_deref(),
+            Some("Desculpe, não falo com estranhos.")
+        );
+
+        let err = toml::from_str::<SlackConfig>("[denial]\nmsg = \"x\"\n")
+            .expect_err("unknown denial key does not parse");
+        assert!(format!("{err:#}").contains("msg"), "{err:#}");
     }
 
     #[test]

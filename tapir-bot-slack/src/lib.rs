@@ -25,7 +25,7 @@ use tapir_bot_core::{ChatBackend, Engine, ReplySink};
 
 use client::Client;
 
-pub use config::{Reactions, SlackConfig};
+pub use config::{Denial, Reactions, SlackConfig};
 
 /// How long to wait before reopening after a failed connection, so a
 /// persistent failure (bad token, Slack outage) does not spin.
@@ -82,6 +82,7 @@ impl ChatBackend for SlackBackend {
         // config is Slack-side); it passes them to the engine per event.
         let access = self.config.access;
         let reactions = Arc::new(self.config.reactions);
+        let denial = Arc::new(self.config.denial);
         let mut loop_guard = LoopGuard::new(access.bot_turn_limit);
         if access.channels.is_empty() && access.dm.users.is_empty() && !access.allow_bots {
             tracing::warn!(
@@ -98,7 +99,7 @@ impl ChatBackend for SlackBackend {
                     return Ok(());
                 }
                 result = run_one_connection(
-                    &client, &engine, &access, &mut loop_guard, &reactions, &bot_user_id,
+                    &client, &engine, &access, &mut loop_guard, &reactions, &denial, &bot_user_id,
                 ) => {
                     match result {
                         // A clean end (disconnect/close) reopens immediately.
@@ -123,6 +124,7 @@ async fn run_one_connection(
     access: &Access,
     loop_guard: &mut LoopGuard,
     reactions: &Arc<Reactions>,
+    denial: &Arc<Denial>,
     bot_user_id: &str,
 ) -> anyhow::Result<()> {
     let url = client.open_connection().await.context("opening a Socket Mode connection")?;
@@ -151,16 +153,25 @@ async fn run_one_connection(
         // Apply the access policy before doing any work, and run the turn off
         // the read loop so the socket keeps being polled (Slack's pings get
         // answered) while the model thinks.
-        if let Some(inbound) = decision.inbound
-            && engine.should_handle(access, loop_guard, bot_user_id, &inbound).await
-        {
-            let client = Arc::clone(client);
-            let engine = Arc::clone(engine);
-            let reactions = Arc::clone(reactions);
-            let bot_user_id = bot_user_id.to_string();
-            tokio::spawn(async move {
-                handle_inbound(&client, &engine, &reactions, &bot_user_id, &inbound).await;
-            });
+        if let Some(inbound) = decision.inbound {
+            if engine.should_handle(access, loop_guard, bot_user_id, &inbound).await {
+                let client = Arc::clone(client);
+                let engine = Arc::clone(engine);
+                let reactions = Arc::clone(reactions);
+                let bot_user_id = bot_user_id.to_string();
+                tokio::spawn(async move {
+                    handle_inbound(&client, &engine, &reactions, &bot_user_id, &inbound).await;
+                });
+            } else if let Some(message) = denial.message.clone()
+                && denied_when_addressed(&inbound, bot_user_id, access)
+            {
+                // A non-allowed user addressed the bot and a denial message is
+                // configured: tell them (ephemerally), off the read loop.
+                let client = Arc::clone(client);
+                tokio::spawn(async move {
+                    send_denial(&client, &inbound, &message).await;
+                });
+            }
         }
 
         if decision.reconnect {
@@ -193,6 +204,37 @@ async fn handle_inbound(
             let mut sink = SlackReply::new(client, inbound.channel.clone(), inbound.thread.clone());
             let _ = sink.update(TURN_FAILED_MESSAGE, true).await;
             add_reaction(client, &inbound.channel, &inbound.ts, &r.failed).await;
+        }
+    }
+}
+
+/// Whether a not-handled `inbound` warrants the access-denied reply: it was
+/// *addressed* to the bot (a mention or a DM — not a thread continuation, not
+/// our own message, not a bot) yet the access policy denied it. This is the
+/// subset of `should_handle == false` that is a real "you can't do that", as
+/// opposed to silent drops (self, bot loops, unknown threads).
+fn denied_when_addressed(inbound: &Inbound, bot_user_id: &str, access: &Access) -> bool {
+    inbound.user != bot_user_id
+        && !inbound.is_bot
+        && !inbound.continuation
+        && !tapir_bot_core::access::allows(access, inbound)
+}
+
+/// Send the access-denied `message` to the user who addressed the bot: styled,
+/// ephemeral first (only they see it), falling back to a DM if the ephemeral
+/// post fails (e.g. the bot isn't in the channel). Best-effort — a failure is
+/// logged, never propagated.
+async fn send_denial(client: &Client, inbound: &Inbound, message: &str) {
+    let (fallback, blocks) = render_message(message);
+    if let Err(error) = client
+        .post_ephemeral(&inbound.channel, &inbound.user, &fallback, blocks.as_deref())
+        .await
+    {
+        tracing::debug!(error = format!("{error:#}"), "ephemeral denial failed; trying a DM");
+        if let Err(error) =
+            client.post_message(&inbound.user, "", &fallback, blocks.as_deref()).await
+        {
+            tracing::warn!(error = format!("{error:#}"), "denial DM fallback failed");
         }
     }
 }
@@ -311,7 +353,68 @@ fn require_env_token(name: &str, value: Option<String>) -> anyhow::Result<String
 
 #[cfg(test)]
 mod tests {
-    use super::{has_slack_controls, render_message, require_env_token};
+    use tapir_bot_core::access::{Access, ChannelAccess, DmAccess};
+    use tapir_bot_core::event::Inbound;
+
+    use super::{denied_when_addressed, has_slack_controls, render_message, require_env_token};
+
+    const BOT: &str = "U0BOT";
+
+    fn inbound(user: &str, is_dm: bool, continuation: bool) -> Inbound {
+        Inbound {
+            channel: if is_dm { "D1".into() } else { "C1".into() },
+            ts: "1.1".into(),
+            thread: "1.1".into(),
+            user: user.into(),
+            text: "<@U0BOT> oi".into(),
+            is_bot: false,
+            is_dm,
+            continuation,
+        }
+    }
+
+    #[test]
+    fn an_addressed_stranger_is_denied() {
+        let access = Access::default(); // deny-by-default
+        // A DM from a non-listed user, and a mention in an unlisted channel.
+        assert!(denied_when_addressed(&inbound("U-stranger", true, false), BOT, &access));
+        assert!(denied_when_addressed(&inbound("U-stranger", false, false), BOT, &access));
+    }
+
+    #[test]
+    fn an_allowed_user_is_not_denied() {
+        let access = Access { dm: DmAccess { users: vec!["U1".into()] }, ..Access::default() };
+        assert!(!denied_when_addressed(&inbound("U1", true, false), BOT, &access));
+    }
+
+    #[test]
+    fn the_bot_itself_and_other_bots_are_not_denied() {
+        let access = Access::default();
+        // our own message
+        assert!(!denied_when_addressed(&inbound(BOT, true, false), BOT, &access));
+        // another bot
+        let mut bot_msg = inbound("U-bot", false, false);
+        bot_msg.is_bot = true;
+        assert!(!denied_when_addressed(&bot_msg, BOT, &access));
+    }
+
+    #[test]
+    fn a_thread_continuation_is_not_a_denial() {
+        // Plain chatter in a channel thread is not "addressed" — never deny it,
+        // even though access would drop it.
+        let access = Access::default();
+        assert!(!denied_when_addressed(&inbound("U-stranger", false, true), BOT, &access));
+    }
+
+    #[test]
+    fn a_channel_member_outside_the_user_list_is_denied() {
+        let mut access = Access::default();
+        access
+            .channels
+            .insert("C1".into(), ChannelAccess { users: vec!["U1".into()] });
+        assert!(denied_when_addressed(&inbound("U2", false, false), BOT, &access));
+        assert!(!denied_when_addressed(&inbound("U1", false, false), BOT, &access));
+    }
 
     #[test]
     fn render_message_emits_blocks_for_markdown() {

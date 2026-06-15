@@ -80,3 +80,10 @@ users = []
 seen = "eyes"               # while the turn is handled
 done = "white_check_mark"   # on success
 failed = "x"                # on failure
+
+# Optional. The reply sent to a non-allowed user who addresses the bot (a
+# mention or DM). Omit it and a denied user just gets silence (the default).
+# Set a message and it is sent to them — styled, ephemeral (only they see it),
+# falling back to a DM — so they know why nothing happened.
+# [denial]
+# message = "Desculpe, não falo com estranhos. Procure <@U01B3N9HGBB>."
