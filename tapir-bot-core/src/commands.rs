@@ -68,15 +68,42 @@ pub fn render_models(rows: &[(&str, &str)]) -> String {
     out.trim_end().to_string()
 }
 
-/// The list of commands.
-pub fn render_help() -> String {
-    "**Commands:**\n\
-     - `!providers` — active providers\n\
-     - `!models` — available provider/model\n\
-     - `!model [provider/model]` — show or set this conversation's model (creator only)\n\
-     - `!forget` — reset this conversation (creator only)\n\
-     - `!help` — this list"
-        .into()
+/// One built-in `!help` row: the hide key (the command's name), the command as
+/// shown, and its description.
+struct Builtin {
+    name: &'static str,
+    command: &'static str,
+    description: &'static str,
+}
+
+/// The built-in commands, in listing order.
+const BUILTINS: &[Builtin] = &[
+    Builtin { name: "providers", command: "!providers", description: "active providers" },
+    Builtin { name: "models", command: "!models", description: "available provider/model" },
+    Builtin {
+        name: "model",
+        command: "!model [provider/model]",
+        description: "show or set this conversation's model (creator only)",
+    },
+    Builtin { name: "forget", command: "!forget", description: "reset this conversation (creator only)" },
+    Builtin { name: "help", command: "!help", description: "this list" },
+];
+
+/// The list of commands. Built-ins whose name is in `help.hide` are omitted, and
+/// `help.extra` rows are appended — so a consumer can tailor the `!help` table
+/// without the library knowing its commands.
+pub fn render_help(help: &crate::config::Help) -> String {
+    let mut out = String::from("**Commands:**");
+    for builtin in BUILTINS {
+        if help.hide.iter().any(|h| h == builtin.name) {
+            continue;
+        }
+        out.push_str(&format!("\n- `{}` — {}", builtin.command, builtin.description));
+    }
+    for row in &help.extra {
+        out.push_str(&format!("\n- `{}` — {}", row.command, row.description));
+    }
+    out
 }
 
 /// The reply for an unrecognized `!<name>`.
@@ -141,9 +168,27 @@ mod tests {
     }
 
     #[test]
-    fn render_help_lists_the_commands() {
-        let out = render_help();
+    fn render_help_lists_the_builtins_by_default() {
+        let out = render_help(&crate::config::Help::default());
         assert!(out.contains("!providers") && out.contains("!models") && out.contains("!help"));
+        assert!(out.contains("!model") && out.contains("!forget"));
         assert!(out.contains("- `!providers`"), "standard-markdown list + inline code: {out}");
+    }
+
+    #[test]
+    fn render_help_hides_built_ins_and_appends_extra_rows() {
+        let help = crate::config::Help {
+            hide: vec!["model".into(), "forget".into()],
+            extra: vec![crate::config::HelpRow {
+                command: "!version".into(),
+                description: "show the build version".into(),
+            }],
+        };
+        let out = render_help(&help);
+        // `!model` shares a prefix with `!models`, so match its unique row text.
+        assert!(!out.contains("[provider/model]"), "hidden !model is gone: {out}");
+        assert!(!out.contains("!forget"), "hidden !forget is gone: {out}");
+        assert!(out.contains("!providers") && out.contains("!models"), "kept built-ins: {out}");
+        assert!(out.contains("- `!version` — show the build version"), "extra row appended: {out}");
     }
 }

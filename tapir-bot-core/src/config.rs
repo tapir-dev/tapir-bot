@@ -24,6 +24,29 @@ pub struct Config {
     /// The tool sandbox. Disabled by default — without it the agent is
     /// text-only and never runs tools on the host.
     pub sandbox: Sandbox,
+    /// Customization of the `!help` listing (hide built-ins, add rows).
+    pub help: Help,
+}
+
+/// Customizes the `!help` command's listing. Affects the *listing only* — a
+/// hidden built-in still runs if typed. The default lists every built-in.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Help {
+    /// Built-in command names to omit from `!help` (e.g. `model`, `forget`).
+    pub hide: Vec<String>,
+    /// Extra rows appended to `!help`, for commands the consumer documents
+    /// itself. Each is `[[help.extra]]` with `command` and `description`.
+    pub extra: Vec<HelpRow>,
+}
+
+/// One extra `!help` row: the command (as shown, e.g. `!version`) and its
+/// one-line description.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelpRow {
+    pub command: String,
+    pub description: String,
 }
 
 /// How the agent's tools are executed for a turn. The gate for tool use:
@@ -152,6 +175,32 @@ mod tests {
         let config = toml::from_str::<Config>("[reactions]\nseen = \"eyes\"\n")
             .expect("a backend's table is ignored, not an error");
         assert_eq!(config.agent.provider, "anthropic");
+    }
+
+    #[test]
+    fn help_defaults_to_empty_and_parses_hide_and_extra() {
+        let empty = toml::from_str::<Config>("").unwrap();
+        assert!(empty.help.hide.is_empty() && empty.help.extra.is_empty());
+
+        let config = toml::from_str::<Config>(
+            r#"
+            [help]
+            hide = ["model", "forget"]
+
+            [[help.extra]]
+            command = "!version"
+            description = "show the build version"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.help.hide, vec!["model", "forget"]);
+        assert_eq!(config.help.extra.len(), 1);
+        assert_eq!(config.help.extra[0].command, "!version");
+        assert_eq!(config.help.extra[0].description, "show the build version");
+
+        let err = toml::from_str::<Config>("[[help.extra]]\ncommand = \"!v\"\n")
+            .expect_err("an extra row needs a description");
+        assert!(format!("{err:#}").contains("description"), "{err:#}");
     }
 
     #[test]

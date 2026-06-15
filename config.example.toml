@@ -53,6 +53,15 @@ idle_minutes = 30
 # the bot's environment, never argv) — e.g. provider/scenario settings.
 # env = ["AWS_PROFILE", "AWS_REGION", "EKS_CLUSTER"]
 
+# Customize the !help listing. Optional — by default it lists every built-in
+# command. `hide` drops built-ins from the listing (they still run if typed);
+# `[[help.extra]]` rows document commands the bot handles itself.
+# [help]
+# hide = ["model", "forget"]
+# [[help.extra]]
+# command = "!version"
+# description = "show the build version"
+
 # ========================= Slack backend (tapir-bot-slack) =========================
 
 # Access policy. Deny-by-default: with no [access] table, the bot answers

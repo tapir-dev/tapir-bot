@@ -42,6 +42,8 @@ pub struct Engine {
     tools: Tools,
     /// The skills notice (enumerated skills) appended to tool-aware prompts.
     skills_notice: Option<String>,
+    /// `!help` listing customization (hidden built-ins, extra rows).
+    help: crate::config::Help,
 }
 
 impl Engine {
@@ -84,7 +86,7 @@ impl Engine {
         let store = Arc::new(FileStore::new(data_dir.join("sessions"), data_dir.clone()));
         let rt = Runtime::builder().store(store).build();
 
-        Ok(Self { rt, settings, memory_dir, data_dir, tools, skills_notice })
+        Ok(Self { rt, settings, memory_dir, data_dir, tools, skills_notice, help: config.help })
     }
 
     /// Log the resolved configuration and start background maintenance (the idle
@@ -255,7 +257,7 @@ impl Engine {
                     .collect();
                 commands::render_models(&refs)
             }
-            Command::Help => commands::render_help(),
+            Command::Help => commands::render_help(&self.help),
             Command::Model(arg) => self.handle_model(inbound, arg).await?,
             Command::Forget => self.handle_forget(inbound).await?,
             Command::Unknown(name) => commands::render_unknown(&name),
