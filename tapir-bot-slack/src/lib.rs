@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tapir_bot_core::access::{Access, LoopGuard};
 use tapir_bot_core::backend::TURN_FAILED_MESSAGE;
 use tapir_bot_core::event::Inbound;
-use tapir_bot_core::{ChatBackend, Engine, ReplySink};
+use tapir_bot_core::{BackendObserver, ChatBackend, Engine, ReplySink};
 
 use client::Client;
 
@@ -53,12 +53,14 @@ pub struct SlackBackend {
     bot_token: String,
     /// The Slack-side config: lifecycle reactions and the access allowlist.
     config: SlackConfig,
+    /// Optional lifecycle observer (metrics/logging).
+    observer: Option<Arc<dyn BackendObserver>>,
 }
 
 impl SlackBackend {
     /// Build the backend from the two Slack tokens and the Slack config.
     pub fn new(app_token: String, bot_token: String, config: SlackConfig) -> Self {
-        Self { app_token, bot_token, config }
+        Self { app_token, bot_token, config, observer: None }
     }
 
     /// Build the backend from the environment: `SLACK_APP_TOKEN` (`xapp-…`) and
@@ -68,6 +70,12 @@ impl SlackBackend {
         let app_token = require_env_token("SLACK_APP_TOKEN", std::env::var("SLACK_APP_TOKEN").ok())?;
         let bot_token = require_env_token("SLACK_BOT_TOKEN", std::env::var("SLACK_BOT_TOKEN").ok())?;
         Ok(Self::new(app_token, bot_token, config))
+    }
+
+    /// Attach a [`BackendObserver`] for connection/turn metrics or logging.
+    pub fn observer(mut self, observer: Arc<dyn BackendObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 }
 
@@ -83,6 +91,7 @@ impl ChatBackend for SlackBackend {
         let access = self.config.access;
         let reactions = Arc::new(self.config.reactions);
         let denial = Arc::new(self.config.denial);
+        let observer = self.observer;
         let mut loop_guard = LoopGuard::new(access.bot_turn_limit);
         if access.channels.is_empty() && access.dm.users.is_empty() && !access.allow_bots {
             tracing::warn!(
@@ -99,14 +108,19 @@ impl ChatBackend for SlackBackend {
                     return Ok(());
                 }
                 result = run_one_connection(
-                    &client, &engine, &access, &mut loop_guard, &reactions, &denial, &bot_user_id,
+                    &client, &engine, &access, &mut loop_guard, &reactions, &denial, &observer,
+                    &bot_user_id,
                 ) => {
                     match result {
                         // A clean end (disconnect/close) reopens immediately.
-                        Ok(()) => tracing::info!("socket closed, reopening"),
+                        Ok(()) => {
+                            tracing::info!("socket closed, reopening");
+                            notify(&observer, |o| o.reconnecting(false));
+                        }
                         // A failure backs off first so we do not hammer Slack.
                         Err(error) => {
                             tracing::warn!(error = format!("{error:#}"), "connection failed, reopening");
+                            notify(&observer, |o| o.reconnecting(true));
                             tokio::time::sleep(RECONNECT_DELAY).await;
                         }
                     }
@@ -118,6 +132,10 @@ impl ChatBackend for SlackBackend {
 
 /// Open one Socket Mode connection and process frames until it disconnects or
 /// the socket closes. Returns `Err` for failures the caller should back off on.
+// The read loop threads the connection's shared pieces (client, engine, policy,
+// reactions, denial, observer, bot id) plus the mutable loop guard; grouping
+// them into a context struct would obscure more than the arg list does.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_connection(
     client: &Arc<Client>,
     engine: &Arc<Engine>,
@@ -125,6 +143,7 @@ async fn run_one_connection(
     loop_guard: &mut LoopGuard,
     reactions: &Arc<Reactions>,
     denial: &Arc<Denial>,
+    observer: &Option<Arc<dyn BackendObserver>>,
     bot_user_id: &str,
 ) -> anyhow::Result<()> {
     let url = client.open_connection().await.context("opening a Socket Mode connection")?;
@@ -132,6 +151,7 @@ async fn run_one_connection(
         .await
         .context("connecting the Socket Mode websocket")?;
     tracing::info!("socket open");
+    notify(observer, |o| o.connected());
 
     while let Some(frame) = socket.next().await {
         let text = match frame {
@@ -154,23 +174,29 @@ async fn run_one_connection(
         // the read loop so the socket keeps being polled (Slack's pings get
         // answered) while the model thinks.
         if let Some(inbound) = decision.inbound {
-            if engine.should_handle(access, loop_guard, bot_user_id, &inbound).await {
+            let admitted = engine.should_handle(access, loop_guard, bot_user_id, &inbound).await;
+            notify(observer, |o| o.received(&inbound, admitted));
+            if admitted {
                 let client = Arc::clone(client);
                 let engine = Arc::clone(engine);
                 let reactions = Arc::clone(reactions);
+                let observer = observer.clone();
                 let bot_user_id = bot_user_id.to_string();
                 tokio::spawn(async move {
-                    handle_inbound(&client, &engine, &reactions, &bot_user_id, &inbound).await;
+                    handle_inbound(&client, &engine, &reactions, &observer, &bot_user_id, &inbound)
+                        .await;
                 });
-            } else if let Some(message) = denial.message.clone()
-                && denied_when_addressed(&inbound, bot_user_id, access)
-            {
-                // A non-allowed user addressed the bot and a denial message is
-                // configured: tell them (ephemerally), off the read loop.
-                let client = Arc::clone(client);
-                tokio::spawn(async move {
-                    send_denial(&client, &inbound, &message).await;
-                });
+            } else if denied_when_addressed(&inbound, bot_user_id, access) {
+                // A non-allowed user addressed the bot: record the denial and,
+                // if a message is configured, tell them (ephemerally), off the
+                // read loop.
+                notify(observer, |o| o.denied(&inbound));
+                if let Some(message) = denial.message.clone() {
+                    let client = Arc::clone(client);
+                    tokio::spawn(async move {
+                        send_denial(&client, &inbound, &message).await;
+                    });
+                }
             }
         }
 
@@ -188,6 +214,7 @@ async fn handle_inbound(
     client: &Client,
     engine: &Engine,
     r: &Reactions,
+    observer: &Option<Arc<dyn BackendObserver>>,
     bot_user_id: &str,
     inbound: &Inbound,
 ) {
@@ -197,6 +224,7 @@ async fn handle_inbound(
     let result = engine.handle(bot_user_id, inbound, &mut sink).await;
 
     remove_reaction(client, &inbound.channel, &inbound.ts, &r.seen).await;
+    let ok = result.is_ok();
     match result {
         Ok(()) => add_reaction(client, &inbound.channel, &inbound.ts, &r.done).await,
         Err(error) => {
@@ -205,6 +233,15 @@ async fn handle_inbound(
             let _ = sink.update(TURN_FAILED_MESSAGE, true).await;
             add_reaction(client, &inbound.channel, &inbound.ts, &r.failed).await;
         }
+    }
+    notify(observer, |o| o.turn_finished(inbound, ok));
+}
+
+/// Call `f` with the observer when one is set; a no-op otherwise. Keeps the
+/// `Option` plumbing out of the lifecycle call sites.
+fn notify(observer: &Option<Arc<dyn BackendObserver>>, f: impl FnOnce(&dyn BackendObserver)) {
+    if let Some(observer) = observer {
+        f(observer.as_ref());
     }
 }
 

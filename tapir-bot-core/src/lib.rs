@@ -28,7 +28,7 @@ pub mod meta;
 pub mod tools;
 
 pub use access::{Access, LoopGuard};
-pub use backend::{ChatBackend, ReplySink};
+pub use backend::{BackendObserver, ChatBackend, ReplySink};
 pub use config::Config;
 pub use engine::{AgentSettings, Engine};
 pub use event::Inbound;
