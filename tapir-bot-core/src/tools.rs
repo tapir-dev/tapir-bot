@@ -70,32 +70,92 @@ impl HostTools {
     }
 }
 
-/// Build the skills notice for the prompt by enumerating the skills under
-/// `skills_dir` (name + the first line of each `SKILL.md`). Listing them by
-/// name makes the model far likelier to use a matching skill than a "go look
-/// in skills/" hint. `None` when there are no skills.
-pub fn skills_notice(skills_dir: &std::path::Path) -> Option<String> {
-    let mut entries: Vec<_> = std::fs::read_dir(skills_dir).ok()?.flatten().collect();
+/// One provisioned skill: its directory name, a one-line description, and an
+/// optional argument placeholder (e.g. `<comando>`) — surfaced by `!skills`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: Option<String>,
+    pub args: Option<String>,
+}
+
+/// Enumerate the skills under `skills_dir` (sorted by name), reading each
+/// `SKILL.md` for its metadata. Empty when the dir is absent or holds no skills.
+pub fn skills(skills_dir: &std::path::Path) -> Vec<Skill> {
+    let Ok(read) = std::fs::read_dir(skills_dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = read.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
-    let mut items = Vec::new();
+    let mut out = Vec::new();
     for entry in entries {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let desc = std::fs::read_to_string(entry.path().join("SKILL.md")).ok().and_then(|text| {
-            text.lines()
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim_start_matches('#').trim().to_string())
-        });
-        match desc {
-            Some(desc) => items.push(format!("- `{name}`: {desc}")),
-            None => items.push(format!("- `{name}`")),
+        let (description, args) = std::fs::read_to_string(entry.path().join("SKILL.md"))
+            .ok()
+            .map(|text| parse_skill_md(&text))
+            .unwrap_or((None, None));
+        out.push(Skill { name, description, args });
+    }
+    out
+}
+
+/// Parse a `SKILL.md` for `(description, args)`: from a leading `---` YAML
+/// frontmatter block (`description:` / `args:`) when present, else the first
+/// non-empty line (leading `#` stripped) is the description and there are no
+/// args. Keeps SKILL.md files without frontmatter working unchanged.
+fn parse_skill_md(text: &str) -> (Option<String>, Option<String>) {
+    if let Some(front) = frontmatter(text) {
+        let description = fm_field(front, "description");
+        let args = fm_field(front, "args");
+        if description.is_some() || args.is_some() {
+            return (description, args);
         }
     }
-    if items.is_empty() {
+    let description = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim_start_matches('#').trim().to_string())
+        .filter(|l| !l.is_empty());
+    (description, None)
+}
+
+/// The text between a leading `---` fence and the next `---` line, if any.
+fn frontmatter(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+/// A scalar `key: value` from a simple YAML frontmatter (unquoted), or `None`.
+fn fm_field(front: &str, key: &str) -> Option<String> {
+    front
+        .lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k.trim() == key).then(|| v.trim().trim_matches(['"', '\'']).trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// Build the skills notice for the prompt by listing the [`skills`] under
+/// `skills_dir` (name + description). Listing them by name makes the model far
+/// likelier to use a matching skill than a "go look in skills/" hint. `None`
+/// when there are no skills.
+pub fn skills_notice(skills_dir: &std::path::Path) -> Option<String> {
+    let skills = skills(skills_dir);
+    if skills.is_empty() {
         return None;
     }
+    let items: Vec<String> = skills
+        .iter()
+        .map(|skill| match &skill.description {
+            Some(desc) => format!("- `{}`: {desc}", skill.name),
+            None => format!("- `{}`", skill.name),
+        })
+        .collect();
     Some(format!(
         "You're in a workspace and can run tools. These skills are \
          available — read `skills/<name>/SKILL.md` for how to use one and run \
@@ -260,6 +320,38 @@ mod tests {
         assert!(notice.contains("does a thing"), "includes the description: {notice}");
         assert!(skills_notice(std::path::Path::new("/no/such/dir")).is_none());
 
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn skills_reads_frontmatter_and_falls_back_to_the_first_line() {
+        let base = std::env::temp_dir().join(format!("tapir-skills-meta-{}", std::process::id()));
+        // Frontmatter skill: description + args.
+        let fm = base.join("shortcut");
+        std::fs::create_dir_all(&fm).unwrap();
+        std::fs::write(
+            fm.join("SKILL.md"),
+            "---\nname: shortcut\ndescription: gerenciar o board\nargs: \"<comando>\"\n---\n\n# body\n",
+        )
+        .unwrap();
+        // Plain skill: first non-empty line is the description, no args.
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("SKILL.md"), "# Plain — does a thing\n\nbody").unwrap();
+
+        let skills = super::skills(&base);
+        assert_eq!(skills.len(), 2);
+        // Sorted by name: "plain" then "shortcut".
+        let plain = &skills[0];
+        assert_eq!(plain.name, "plain");
+        assert_eq!(plain.description.as_deref(), Some("Plain — does a thing"));
+        assert_eq!(plain.args, None);
+        let sc = &skills[1];
+        assert_eq!(sc.name, "shortcut");
+        assert_eq!(sc.description.as_deref(), Some("gerenciar o board"));
+        assert_eq!(sc.args.as_deref(), Some("<comando>"));
+
+        assert!(super::skills(std::path::Path::new("/no/such/dir")).is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
 
