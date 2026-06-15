@@ -1,6 +1,46 @@
 //! Bot meta-commands: `!`-prefixed messages the bot answers directly, without
-//! a model turn. Parsing and formatting are pure (tested here); the runtime
-//! and environment gathering lives in the read loop.
+//! a model turn. The built-ins are parsed/rendered here (pure, tested);
+//! consumers register their own via [`CommandHandler`].
+
+use crate::event::Inbound;
+use crate::tools::Skill;
+
+/// Help/identity metadata for a command — drives the `!help` listing and the
+/// dispatcher (a registered command matches on [`name`](CommandSpec::name)).
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    /// The command name, without the leading `!` (e.g. `version`).
+    pub name: String,
+    /// An optional argument placeholder, shown as `!name <args>` in `!help`
+    /// (e.g. `<provider/model>`). `None` for a no-argument command.
+    pub args: Option<String>,
+    /// One-line description for the `!help` listing.
+    pub description: String,
+}
+
+/// What a [`CommandHandler`] sees for one invocation. `#[non_exhaustive]` so
+/// fields can be added without breaking downstream handlers.
+#[non_exhaustive]
+pub struct CommandContext<'a> {
+    /// The text after the command name, trimmed (empty when none).
+    pub arg: &'a str,
+    /// The message that triggered the command (user / channel / thread).
+    pub inbound: &'a Inbound,
+    /// The skills provisioned for the bot (for skill-aware commands).
+    pub skills: &'a [Skill],
+}
+
+/// A consumer-registered `!`-command, answered directly (no model turn). The
+/// engine parses `!<name> [arg]`, finds the handler whose
+/// [`CommandSpec::name`] matches, and posts the markdown that
+/// [`run`](CommandHandler::run) returns. Register handlers on the bot builder.
+#[async_trait::async_trait]
+pub trait CommandHandler: Send + Sync {
+    /// The command's identity and help metadata.
+    fn spec(&self) -> CommandSpec;
+    /// Produce the reply markdown for one invocation.
+    async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<String>;
+}
 
 /// A recognized command — the whole trimmed message (after the mention is
 /// stripped) beginning with `!`.
@@ -114,6 +154,41 @@ pub fn render_unknown(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_command_handler_exposes_its_spec_and_runs() {
+        struct Greet;
+        #[async_trait::async_trait]
+        impl CommandHandler for Greet {
+            fn spec(&self) -> CommandSpec {
+                CommandSpec {
+                    name: "greet".into(),
+                    args: Some("<nome>".into()),
+                    description: "diz oi".into(),
+                }
+            }
+            async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<String> {
+                Ok(format!("oi {}", ctx.arg))
+            }
+        }
+        let handler = Greet;
+        assert_eq!(handler.spec().name, "greet");
+        assert_eq!(handler.spec().args.as_deref(), Some("<nome>"));
+        let inbound = Inbound {
+            channel: "C".into(),
+            ts: "1".into(),
+            thread: "1".into(),
+            user: "U".into(),
+            text: "!greet ana".into(),
+            is_bot: false,
+            is_dm: false,
+            continuation: false,
+        };
+        let ctx = CommandContext { arg: "ana", inbound: &inbound, skills: &[] };
+        assert_eq!(handler.run(&ctx).await.unwrap(), "oi ana");
+        // Object-safe: registries hold `Arc<dyn CommandHandler>`.
+        let _boxed: std::sync::Arc<dyn CommandHandler> = std::sync::Arc::new(Greet);
+    }
 
     #[test]
     fn parse_recognizes_the_commands() {
