@@ -1520,6 +1520,7 @@ dependencies = [
 [[package]]
 name = "tapir"
 version = "0.1.0"
+source = "git+https://github.com/tapir-dev/tapir?rev=1f7849f#1f7849fabccc202fa36809f0dfe6042ee4668b06"
 dependencies = [
  "tapir-ai",
  "tapir-core",
@@ -1528,6 +1529,7 @@ dependencies = [
 [[package]]
 name = "tapir-ai"
 version = "0.1.0"
+source = "git+https://github.com/tapir-dev/tapir?rev=1f7849f#1f7849fabccc202fa36809f0dfe6042ee4668b06"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1591,6 +1593,7 @@ dependencies = [
 [[package]]
 name = "tapir-core"
 version = "0.1.0"
+source = "git+https://github.com/tapir-dev/tapir?rev=1f7849f#1f7849fabccc202fa36809f0dfe6042ee4668b06"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1610,6 +1613,7 @@ dependencies = [
 [[package]]
 name = "tapir-sandbox"
 version = "0.1.0"
+source = "git+https://github.com/tapir-dev/tapir-sandbox?rev=ff627fb#ff627fb8f24303e9249071425d7d6305b7349a70"
 dependencies = [
  "anyhow",
  "async-trait",

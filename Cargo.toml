@@ -39,11 +39,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CommonMark + GFM-tables parser; mapped to Slack Block Kit. default-features
 # off drops the bundled binary's getopts/html.
 pulldown-cmark = { version = "0.13.4", default-features = false }
-# The agent SDK: provider-neutral LLM layer + turn engine. Path dependency on
-# the sibling checkout, so the bot needs ../tapir to build.
-tapir = { path = "../tapir/tapir" }
+# The agent SDK: provider-neutral LLM layer + turn engine. Git dependency (not a
+# sibling path) so tapir-bot resolves standalone and can be consumed as a git
+# dependency. For local co-development against an uncommitted ../tapir, add a
+# `[patch."https://github.com/tapir-dev/tapir"]` to this workspace root.
+tapir = { git = "https://github.com/tapir-dev/tapir", rev = "1f7849f" }
 # The docker/podman sandbox tools run in (ExecOps/FsOps over a container).
-tapir-sandbox = { path = "../tapir-sandbox" }
+tapir-sandbox = { git = "https://github.com/tapir-dev/tapir-sandbox", rev = "ff627fb" }
 # Host uid/gid, so the sandbox container runs as the host user (workspace files
 # stay host-owned, not root).
 libc = "0.2"
