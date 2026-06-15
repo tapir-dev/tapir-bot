@@ -365,7 +365,33 @@ fn collect_text(events: &[Event], i: &mut usize, is_end: impl Fn(&TagEnd) -> boo
 
 /// Push a text element, merging the style. Skips empty strings (which Slack
 /// rejects).
+/// Append `text`, turning any bare `http(s)://` URL into a clickable `link`
+/// element (Block Kit's `rich_text` does not autolink plain text the way
+/// `[label](url)` does). Inline `code` is left literal so a URL inside
+/// backticks stays verbatim.
 fn push_text(out: &mut Vec<Value>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if style.code {
+        push_plain(out, text, style);
+        return;
+    }
+    let mut rest = text;
+    while let Some((before, url, after)) = split_url(rest) {
+        push_plain(out, before, style);
+        if is_url(url) {
+            out.push(link_element(url, url, style));
+        } else {
+            push_plain(out, url, style);
+        }
+        rest = after;
+    }
+    push_plain(out, rest, style);
+}
+
+/// A single `text` rich-text element (no URL scanning).
+fn push_plain(out: &mut Vec<Value>, text: &str, style: Style) {
     if text.is_empty() {
         return;
     }
@@ -376,6 +402,59 @@ fn push_text(out: &mut Vec<Value>, text: &str, style: Style) {
         obj.insert("style".into(), s);
     }
     out.push(Value::Object(obj));
+}
+
+/// Split `text` at the next bare `http(s)://` URL, returning
+/// `(before, url, after)`. The `url` run ends at whitespace or a delimiter and
+/// has trailing sentence punctuation trimmed off. Returns `None` when there is
+/// no scheme left.
+fn split_url(text: &str) -> Option<(&str, &str, &str)> {
+    let start = url_start(text)?;
+    let rest = &text[start..];
+    let len = url_len(rest);
+    Some((&text[..start], &rest[..len], &rest[len..]))
+}
+
+/// The byte offset of the earliest `http://`/`https://` in `text`.
+fn url_start(text: &str) -> Option<usize> {
+    match (text.find("http://"), text.find("https://")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
+/// The byte length of the URL run at the start of `s` (which begins with a
+/// scheme). Stops at whitespace or `< > " \` | )` and trims trailing sentence
+/// punctuation; a closing `)` is kept only when the URL has a matching `(`.
+fn url_len(s: &str) -> usize {
+    let mut end = 0;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '`' | '|') {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+    let bytes = s.as_bytes();
+    while end > 0 {
+        let trim = match bytes[end - 1] {
+            b'.' | b',' | b';' | b':' | b'!' | b'?' | b'\'' | b']' | b'}' => true,
+            b')' => s[..end].matches('(').count() < s[..end].matches(')').count(),
+            _ => false,
+        };
+        if trim {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+/// Whether `url` is a scheme with a non-empty host (so we don't link a bare
+/// `http://`).
+fn is_url(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(_, host)| !host.is_empty())
 }
 
 /// A `link` rich-text element. Falls back to the URL as the label when the link
@@ -558,6 +637,45 @@ mod tests {
         let el = &blocks[0]["elements"][0]["elements"][0];
         assert_eq!(el["text"], "just words");
         assert!(el.get("style").is_none(), "no empty style: {el}");
+    }
+
+    #[test]
+    fn a_bare_url_in_prose_becomes_a_clickable_link() {
+        let blocks = to_blocks("veja https://app.shortcut.com/kovi/story/42 agora.");
+        let els = blocks[0]["elements"][0]["elements"].as_array().unwrap();
+        // before-text, the link, then after-text.
+        assert_eq!(els[0]["type"], "text");
+        assert_eq!(els[0]["text"], "veja ");
+        assert_eq!(els[1]["type"], "link");
+        assert_eq!(els[1]["url"], "https://app.shortcut.com/kovi/story/42");
+        assert_eq!(els[1]["text"], "https://app.shortcut.com/kovi/story/42");
+        // The trailing "." is not swallowed into the URL.
+        assert_eq!(els[2]["type"], "text");
+        assert_eq!(els[2]["text"], " agora.");
+    }
+
+    #[test]
+    fn a_url_inside_inline_code_stays_literal() {
+        let blocks = to_blocks("rode `curl https://x.test`");
+        let els = blocks[0]["elements"][0]["elements"].as_array().unwrap();
+        // The code element keeps the URL as verbatim text, not a link.
+        assert!(
+            els.iter()
+                .any(|e| e["style"]["code"] == true && e["text"] == "curl https://x.test"),
+            "code stays literal: {els:?}"
+        );
+        assert!(els.iter().all(|e| e["type"] != "link"), "no link: {els:?}");
+    }
+
+    #[test]
+    fn a_markdown_link_is_not_double_processed() {
+        // The label is plain words, so the only link comes from the [..](..).
+        let blocks = to_blocks("abra [a story](https://app.shortcut.com/s/1) ok");
+        let els = blocks[0]["elements"][0]["elements"].as_array().unwrap();
+        let links: Vec<_> = els.iter().filter(|e| e["type"] == "link").collect();
+        assert_eq!(links.len(), 1, "exactly one link: {els:?}");
+        assert_eq!(links[0]["url"], "https://app.shortcut.com/s/1");
+        assert_eq!(links[0]["text"], "a story");
     }
 
     #[test]
