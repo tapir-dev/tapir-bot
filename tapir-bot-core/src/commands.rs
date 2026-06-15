@@ -42,43 +42,20 @@ pub trait CommandHandler: Send + Sync {
     async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<String>;
 }
 
-/// A recognized command — the whole trimmed message (after the mention is
-/// stripped) beginning with `!`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Command {
-    /// `!providers` — the active providers (an API key is set).
-    Providers,
-    /// `!models` — `provider/model` for the active providers.
-    Models,
-    /// `!help` — the available commands.
-    Help,
-    /// `!model` (show the current model) or `!model <provider/model>` (set it
-    /// for this conversation). Owner-only.
-    Model(Option<String>),
-    /// `!forget` — reset this conversation (history + model override).
-    /// Owner-only.
-    Forget,
-    /// `!<name>` that isn't recognized.
-    Unknown(String),
-}
-
-/// Parse `text` (the message, mention already stripped) as a command. A command
-/// is the whole trimmed text starting with `!`, named by its first word.
-/// Returns `None` for ordinary text (no `!` prefix, or a bare `!`).
-pub fn parse(text: &str) -> Option<Command> {
+/// Parse a `!`-invocation into `(name, arg)`: a message (mention already
+/// stripped) whose trimmed text starts with `!`; the first word is the command
+/// name and the rest (trimmed) is the argument (empty when none). `None` for
+/// ordinary text (no `!` prefix) or a bare `!`. The engine dispatches the name
+/// to a built-in, then a registered [`CommandHandler`], then "unknown".
+pub fn parse_invocation(text: &str) -> Option<(String, String)> {
     let rest = text.trim().strip_prefix('!')?;
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("");
-    let arg = parts.next().unwrap_or("").trim();
-    match name {
-        "" => None,
-        "providers" => Some(Command::Providers),
-        "models" => Some(Command::Models),
-        "help" => Some(Command::Help),
-        "model" => Some(Command::Model((!arg.is_empty()).then(|| arg.to_string()))),
-        "forget" => Some(Command::Forget),
-        other => Some(Command::Unknown(other.to_string())),
+    if name.is_empty() {
+        return None;
     }
+    let arg = parts.next().unwrap_or("").trim();
+    Some((name.to_string(), arg.to_string()))
 }
 
 // Renderers emit standard Markdown (`**bold**`, `-` bullets, `` `code` ``); the
@@ -190,40 +167,30 @@ mod tests {
         let _boxed: std::sync::Arc<dyn CommandHandler> = std::sync::Arc::new(Greet);
     }
 
-    #[test]
-    fn parse_recognizes_the_commands() {
-        assert_eq!(parse("!providers"), Some(Command::Providers));
-        assert_eq!(parse("!models"), Some(Command::Models));
-        assert_eq!(parse("!help"), Some(Command::Help));
+    fn inv(text: &str) -> Option<(String, String)> {
+        parse_invocation(text)
     }
 
     #[test]
-    fn parse_trims_and_takes_the_first_word() {
-        assert_eq!(parse("   !providers  "), Some(Command::Providers));
-        assert_eq!(parse("!models please"), Some(Command::Models), "extra args ignored");
-    }
-
-    #[test]
-    fn parse_returns_unknown_for_an_unrecognized_bang() {
-        assert_eq!(parse("!frobnicate"), Some(Command::Unknown("frobnicate".into())));
-    }
-
-    #[test]
-    fn parse_captures_the_model_argument_and_forget() {
-        assert_eq!(parse("!model"), Some(Command::Model(None)));
+    fn parse_invocation_splits_name_and_arg() {
+        assert_eq!(inv("!providers"), Some(("providers".into(), String::new())));
+        assert_eq!(inv("   !providers  "), Some(("providers".into(), String::new())));
         assert_eq!(
-            parse("!model anthropic/claude-x"),
-            Some(Command::Model(Some("anthropic/claude-x".into())))
+            inv("!model anthropic/claude-x"),
+            Some(("model".into(), "anthropic/claude-x".into()))
         );
-        assert_eq!(parse("!forget"), Some(Command::Forget));
+        // The name is the first word; the rest (trimmed) is the arg.
+        assert_eq!(inv("!skills extra"), Some(("skills".into(), "extra".into())));
+        // An unknown name still parses — the engine dispatches it (custom/unknown).
+        assert_eq!(inv("!frobnicate"), Some(("frobnicate".into(), String::new())));
     }
 
     #[test]
-    fn parse_is_none_for_ordinary_text() {
-        assert_eq!(parse("hello there"), None);
-        assert_eq!(parse("what about !providers"), None, "mid-prose is not a command");
-        assert_eq!(parse("!"), None, "a bare bang is not a command");
-        assert_eq!(parse("   "), None);
+    fn parse_invocation_is_none_for_ordinary_text() {
+        assert_eq!(inv("hello there"), None);
+        assert_eq!(inv("what about !providers"), None, "mid-prose is not a command");
+        assert_eq!(inv("!"), None, "a bare bang is not a command");
+        assert_eq!(inv("   "), None);
     }
 
     #[test]

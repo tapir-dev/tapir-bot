@@ -157,7 +157,7 @@ impl Engine {
             // thread. Ordinary chatter only continues a thread the bot is
             // already in (has saved history for).
             let stripped = strip_mention(&inbound.text, bot_id);
-            if commands::parse(&stripped).is_none() {
+            if commands::parse_invocation(&stripped).is_none() {
                 let id = memory::conversation_id(inbound);
                 if self.rt.store().load(&id).await.is_err() {
                     tracing::debug!(%id, "thread not known; ignoring continuation");
@@ -184,8 +184,8 @@ impl Engine {
         let stripped = strip_mention(&inbound.text, bot_id);
 
         // A `!`-command is answered directly — no model turn, no memory.
-        if let Some(command) = commands::parse(&stripped) {
-            return self.run_command(inbound, command, sink).await;
+        if let Some((name, arg)) = commands::parse_invocation(&stripped) {
+            return self.run_command(inbound, &name, &arg, sink).await;
         }
 
         let id = memory::conversation_id(inbound);
@@ -223,16 +223,17 @@ impl Engine {
     }
 
     /// Run a `!`-command and post its reply. No model turn, no memory write.
+    /// Dispatch order: built-in name, then a registered [`CommandHandler`], then
+    /// the "unknown command" reply.
     async fn run_command(
         &self,
         inbound: &Inbound,
-        command: commands::Command,
+        name: &str,
+        arg: &str,
         sink: &mut dyn ReplySink,
     ) -> anyhow::Result<()> {
-        use commands::Command;
-
-        let text = match command {
-            Command::Providers => {
+        let text = match name {
+            "providers" => {
                 let active: Vec<&str> = self
                     .rt
                     .providers()
@@ -242,7 +243,7 @@ impl Engine {
                     .collect();
                 commands::render_providers(&active)
             }
-            Command::Models => {
+            "models" => {
                 // provider/model for every active provider.
                 let rows: Vec<(String, String)> = self
                     .rt
@@ -257,10 +258,12 @@ impl Engine {
                     .collect();
                 commands::render_models(&refs)
             }
-            Command::Help => commands::render_help(&self.help),
-            Command::Model(arg) => self.handle_model(inbound, arg).await?,
-            Command::Forget => self.handle_forget(inbound).await?,
-            Command::Unknown(name) => commands::render_unknown(&name),
+            "help" => commands::render_help(&self.help),
+            "model" => {
+                self.handle_model(inbound, (!arg.is_empty()).then(|| arg.to_string())).await?
+            }
+            "forget" => self.handle_forget(inbound).await?,
+            other => commands::render_unknown(other),
         };
 
         sink.update(&text, true).await?;
