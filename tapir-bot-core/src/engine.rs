@@ -213,11 +213,25 @@ impl Engine {
             return self.run_command(inbound, &name, &arg, sink).await;
         }
 
+        self.run_model_turn(inbound, &stripped, sink).await
+    }
+
+    /// Run a model turn for `inbound` with `prompt` as the user message: load the
+    /// conversation, inject memory, stream the reply through `sink`, then persist.
+    /// An empty prompt becomes a brief greeting. Used both for ordinary messages
+    /// and for a command that expands into an agent turn
+    /// ([`CommandOutcome::Prompt`](commands::CommandOutcome)).
+    async fn run_model_turn(
+        &self,
+        inbound: &Inbound,
+        prompt: &str,
+        sink: &mut dyn ReplySink,
+    ) -> anyhow::Result<()> {
         let id = memory::conversation_id(inbound);
-        let prompt = if stripped.is_empty() {
+        let prompt = if prompt.is_empty() {
             "Greet the user briefly and offer to help.".to_string()
         } else {
-            stripped
+            prompt.to_string()
         };
 
         // Record the creator on the first turn (the owner of `!model`/`!forget`),
@@ -298,7 +312,14 @@ impl Engine {
             other => match self.commands.get(other) {
                 Some(handler) => {
                     let ctx = CommandContext { arg, inbound, skills: &self.skills };
-                    handler.run(&ctx).await?
+                    match handler.run(&ctx).await? {
+                        commands::CommandOutcome::Reply(text) => text,
+                        // Expand into an agent turn: the model runs with `prompt`,
+                        // using the generic skills, and streams its own reply.
+                        commands::CommandOutcome::Prompt(prompt) => {
+                            return self.run_model_turn(inbound, &prompt, sink).await;
+                        }
+                    }
                 }
                 None => commands::render_unknown(other),
             },
@@ -584,7 +605,7 @@ mod tests {
     fn the_registry_skips_built_in_and_duplicate_names() {
         use std::sync::Arc;
 
-        use crate::commands::{CommandContext, CommandHandler, CommandSpec};
+        use crate::commands::{CommandContext, CommandHandler, CommandOutcome, CommandSpec};
 
         struct Named(&'static str);
         #[async_trait::async_trait]
@@ -592,8 +613,8 @@ mod tests {
             fn spec(&self) -> CommandSpec {
                 CommandSpec { name: self.0.into(), args: None, description: "x".into() }
             }
-            async fn run(&self, _ctx: &CommandContext<'_>) -> anyhow::Result<String> {
-                Ok(String::new())
+            async fn run(&self, _ctx: &CommandContext<'_>) -> anyhow::Result<CommandOutcome> {
+                Ok(CommandOutcome::Reply(String::new()))
             }
         }
 

@@ -29,7 +29,7 @@ pub mod tools;
 
 pub use access::{Access, LoopGuard};
 pub use backend::{BackendObserver, ChatBackend, ReplySink};
-pub use commands::{CommandContext, CommandHandler, CommandSpec};
+pub use commands::{CommandContext, CommandHandler, CommandOutcome, CommandSpec};
 pub use config::Config;
 pub use engine::{AgentSettings, Engine};
 pub use event::Inbound;

@@ -26,8 +26,8 @@ use std::sync::Arc;
 use tapir_bot_core::Engine;
 
 pub use tapir_bot_core::{
-    self as core, ChatBackend, CommandContext, CommandHandler, CommandSpec, Config, Inbound,
-    ReplySink, Skill, config,
+    self as core, ChatBackend, CommandContext, CommandHandler, CommandOutcome, CommandSpec, Config,
+    Inbound, ReplySink, Skill, config,
 };
 
 /// The Slack backend, re-exported when the `slack` feature is on (default).

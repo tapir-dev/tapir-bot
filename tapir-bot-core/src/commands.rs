@@ -30,16 +30,27 @@ pub struct CommandContext<'a> {
     pub skills: &'a [Skill],
 }
 
-/// A consumer-registered `!`-command, answered directly (no model turn). The
-/// engine parses `!<name> [arg]`, finds the handler whose
-/// [`CommandSpec::name`] matches, and posts the markdown that
-/// [`run`](CommandHandler::run) returns. Register handlers on the bot builder.
+/// What a [`CommandHandler`] does with an invocation.
+pub enum CommandOutcome {
+    /// Post this markdown directly — no model turn (the default, cheap path).
+    Reply(String),
+    /// Run a model turn with this prompt, as if the user had typed it: the agent
+    /// uses its generic skills/tools and streams its own reply. Use this when a
+    /// command should delegate to the agent (e.g. read a thread and act on it)
+    /// rather than answer deterministically.
+    Prompt(String),
+}
+
+/// A consumer-registered `!`-command. The engine parses `!<name> [arg]`, finds
+/// the handler whose [`CommandSpec::name`] matches, and either posts its
+/// [`Reply`](CommandOutcome::Reply) or runs its [`Prompt`](CommandOutcome::Prompt)
+/// as an agent turn. Register handlers on the bot builder.
 #[async_trait::async_trait]
 pub trait CommandHandler: Send + Sync {
     /// The command's identity and help metadata.
     fn spec(&self) -> CommandSpec;
-    /// Produce the reply markdown for one invocation.
-    async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<String>;
+    /// Handle one invocation: reply directly, or delegate to an agent turn.
+    async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<CommandOutcome>;
 }
 
 /// Parse a `!`-invocation into `(name, arg)`: a message (mention already
@@ -172,8 +183,8 @@ mod tests {
                     description: "diz oi".into(),
                 }
             }
-            async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<String> {
-                Ok(format!("oi {}", ctx.arg))
+            async fn run(&self, ctx: &CommandContext<'_>) -> anyhow::Result<CommandOutcome> {
+                Ok(CommandOutcome::Reply(format!("oi {}", ctx.arg)))
             }
         }
         let handler = Greet;
@@ -190,7 +201,10 @@ mod tests {
             continuation: false,
         };
         let ctx = CommandContext { arg: "ana", inbound: &inbound, skills: &[] };
-        assert_eq!(handler.run(&ctx).await.unwrap(), "oi ana");
+        match handler.run(&ctx).await.unwrap() {
+            CommandOutcome::Reply(text) => assert_eq!(text, "oi ana"),
+            CommandOutcome::Prompt(_) => panic!("expected a Reply"),
+        }
         // Object-safe: registries hold `Arc<dyn CommandHandler>`.
         let _boxed: std::sync::Arc<dyn CommandHandler> = std::sync::Arc::new(Greet);
     }
