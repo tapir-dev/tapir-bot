@@ -25,7 +25,10 @@ use std::sync::Arc;
 
 use tapir_bot_core::Engine;
 
-pub use tapir_bot_core::{self as core, ChatBackend, Config, Inbound, ReplySink, config};
+pub use tapir_bot_core::{
+    self as core, ChatBackend, CommandContext, CommandHandler, CommandSpec, Config, Inbound,
+    ReplySink, Skill, config,
+};
 
 /// The Slack backend, re-exported when the `slack` feature is on (default).
 #[cfg(feature = "slack")]
@@ -38,6 +41,7 @@ pub use tapir_bot_slack as slack;
 pub struct Bot {
     config: Config,
     skills_dir: Option<PathBuf>,
+    commands: Vec<Arc<dyn CommandHandler>>,
 }
 
 impl Bot {
@@ -45,7 +49,21 @@ impl Bot {
     /// `[agent].tools` is `host`/`sandbox`, and only if the directory exists).
     pub fn new(config: Config) -> Self {
         let skills_dir = std::env::current_dir().ok().map(|dir| dir.join("skills"));
-        Self { config, skills_dir }
+        Self { config, skills_dir, commands: Vec::new() }
+    }
+
+    /// Register a custom `!`-command. The engine answers `!<name>` by calling
+    /// the handler (no model turn) and lists it in `!help`. A name that shadows
+    /// a built-in is ignored with a warning.
+    pub fn command(mut self, handler: Arc<dyn CommandHandler>) -> Self {
+        self.commands.push(handler);
+        self
+    }
+
+    /// Register several custom `!`-commands at once.
+    pub fn commands(mut self, handlers: impl IntoIterator<Item = Arc<dyn CommandHandler>>) -> Self {
+        self.commands.extend(handlers);
+        self
     }
 
     /// Override the repo `skills/` directory provisioned into each tool
@@ -65,7 +83,7 @@ impl Bot {
     /// process is stopped. Resolves the model and validates the provider key up
     /// front, so a misconfigured bot fails before connecting.
     pub async fn run<B: ChatBackend>(self, backend: B) -> anyhow::Result<()> {
-        let engine = Engine::from_config(self.config, self.skills_dir)?;
+        let engine = Engine::from_config(self.config, self.skills_dir, self.commands)?;
         let engine = Arc::new(engine);
         engine.start();
         backend.run(engine).await

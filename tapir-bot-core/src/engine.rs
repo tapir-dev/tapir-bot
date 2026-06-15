@@ -5,6 +5,7 @@
 //! live here; the access policy and the bot loop cap are passed in by the
 //! backend (which owns that config), and a backend supplies the I/O.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,12 +15,16 @@ use tapir::store::FileStore;
 
 use crate::access::{Access, LoopGuard};
 use crate::backend::ReplySink;
+use crate::commands::{CommandContext, CommandHandler};
 use crate::config::{Config, ToolMode};
 use crate::event::Inbound;
 #[cfg(feature = "sandbox")]
 use crate::tools::build_sandbox_manager;
-use crate::tools::{HostTools, Tools};
+use crate::tools::{HostTools, Skill, Tools};
 use crate::{commands, memory, meta};
+
+/// Built-in command names; a registered command may not shadow these.
+const BUILTIN_COMMANDS: &[&str] = &["providers", "models", "help", "model", "forget", "skills"];
 
 /// The resolved model settings a turn runs on.
 pub struct AgentSettings {
@@ -42,8 +47,12 @@ pub struct Engine {
     tools: Tools,
     /// The skills notice (enumerated skills) appended to tool-aware prompts.
     skills_notice: Option<String>,
+    /// The provisioned skills, for `!skills` and skill-aware commands.
+    skills: Vec<Skill>,
     /// `!help` listing customization (hidden built-ins, extra rows).
     help: crate::config::Help,
+    /// Consumer-registered `!`-commands, keyed by name.
+    commands: HashMap<String, Arc<dyn CommandHandler>>,
 }
 
 impl Engine {
@@ -51,7 +60,11 @@ impl Engine {
     /// (provisioned into each tool workspace); pass `None` to disable skills.
     /// Resolves the model and validates the provider's API key up front, so a
     /// misconfigured bot fails at startup rather than mid-turn.
-    pub fn from_config(config: Config, skills_dir: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn from_config(
+        config: Config,
+        skills_dir: Option<PathBuf>,
+        handlers: Vec<Arc<dyn CommandHandler>>,
+    ) -> anyhow::Result<Self> {
         let provider = config.agent.provider;
         let model = resolve_model(
             config.agent.model.as_deref(),
@@ -67,6 +80,8 @@ impl Engine {
         let memory_dir = config.storage.memory_dir.unwrap_or_else(|| data_dir.clone());
         let repo_skills = skills_dir.filter(|p| p.is_dir());
         let skills_notice = repo_skills.as_deref().and_then(crate::tools::skills_notice);
+        let skills = repo_skills.as_deref().map(crate::tools::skills).unwrap_or_default();
+        let commands = build_command_registry(handlers);
         let tools = match config.agent.tools {
             ToolMode::Host => Tools::Host(Arc::new(HostTools::new(&data_dir, repo_skills))),
             ToolMode::None => Tools::None,
@@ -86,7 +101,17 @@ impl Engine {
         let store = Arc::new(FileStore::new(data_dir.join("sessions"), data_dir.clone()));
         let rt = Runtime::builder().store(store).build();
 
-        Ok(Self { rt, settings, memory_dir, data_dir, tools, skills_notice, help: config.help })
+        Ok(Self {
+            rt,
+            settings,
+            memory_dir,
+            data_dir,
+            tools,
+            skills_notice,
+            skills,
+            help: config.help,
+            commands,
+        })
     }
 
     /// Log the resolved configuration and start background maintenance (the idle
@@ -263,7 +288,13 @@ impl Engine {
                 self.handle_model(inbound, (!arg.is_empty()).then(|| arg.to_string())).await?
             }
             "forget" => self.handle_forget(inbound).await?,
-            other => commands::render_unknown(other),
+            other => match self.commands.get(other) {
+                Some(handler) => {
+                    let ctx = CommandContext { arg, inbound, skills: &self.skills };
+                    handler.run(&ctx).await?
+                }
+                None => commands::render_unknown(other),
+            },
         };
 
         sink.update(&text, true).await?;
@@ -438,6 +469,33 @@ fn owner_denied(meta: &meta::ConversationMeta, user: &str) -> Option<String> {
     }
 }
 
+/// Build the registered-command map, keyed by name. Skips a handler whose name
+/// shadows a built-in or a name already taken (first registration wins) — with
+/// a warning, so a misconfiguration is visible but never hijacks a built-in.
+fn build_command_registry(
+    handlers: Vec<Arc<dyn CommandHandler>>,
+) -> HashMap<String, Arc<dyn CommandHandler>> {
+    use std::collections::hash_map::Entry;
+
+    let mut map: HashMap<String, Arc<dyn CommandHandler>> = HashMap::new();
+    for handler in handlers {
+        let name = handler.spec().name;
+        if BUILTIN_COMMANDS.contains(&name.as_str()) {
+            tracing::warn!(%name, "ignoring custom command that shadows a built-in");
+            continue;
+        }
+        match map.entry(name) {
+            Entry::Occupied(slot) => {
+                tracing::warn!(name = %slot.key(), "ignoring duplicate custom command (first wins)");
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(handler);
+            }
+        }
+    }
+    map
+}
+
 /// Whether the provider's API key is present (and non-blank) in the
 /// environment — i.e. the provider is usable.
 fn provider_active(id: &str) -> bool {
@@ -510,7 +568,37 @@ fn require_provider_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{mentions_bot, prompt_spec_for, require_provider_key, resolve_model, strip_mention};
+    use super::{
+        build_command_registry, mentions_bot, prompt_spec_for, require_provider_key, resolve_model,
+        strip_mention,
+    };
+
+    #[test]
+    fn the_registry_skips_built_in_and_duplicate_names() {
+        use std::sync::Arc;
+
+        use crate::commands::{CommandContext, CommandHandler, CommandSpec};
+
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl CommandHandler for Named {
+            fn spec(&self) -> CommandSpec {
+                CommandSpec { name: self.0.into(), args: None, description: "x".into() }
+            }
+            async fn run(&self, _ctx: &CommandContext<'_>) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        let registry = build_command_registry(vec![
+            Arc::new(Named("version")) as Arc<dyn CommandHandler>,
+            Arc::new(Named("help")),    // shadows a built-in → skipped
+            Arc::new(Named("version")), // duplicate → skipped (first wins)
+        ]);
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains_key("version"));
+        assert!(!registry.contains_key("help"), "built-in not shadowable");
+    }
 
     #[test]
     fn prompt_spec_is_tool_aware_when_tools_are_enabled() {
