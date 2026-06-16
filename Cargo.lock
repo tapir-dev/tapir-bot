@@ -267,6 +267,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "etcetera"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de48cc4d1c1d97a20fd819def54b890cadde72ed3ad0c614822a0a433361be96"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "eventsource-stream"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1520,10 +1530,10 @@ dependencies = [
 [[package]]
 name = "tapir"
 version = "0.1.0"
-source = "git+https://github.com/tapir-dev/tapir?rev=1f7849f#1f7849fabccc202fa36809f0dfe6042ee4668b06"
+source = "git+https://github.com/tapir-dev/tapir?rev=f09cb68#f09cb680fc974bebf77668cf673faa59abc3bc96"
 dependencies = [
- "tapir-ai",
- "tapir-core",
+ "tapir-ai 0.1.0 (git+https://github.com/tapir-dev/tapir?rev=f09cb68)",
+ "tapir-core 0.1.0 (git+https://github.com/tapir-dev/tapir?rev=f09cb68)",
 ]
 
 [[package]]
@@ -1534,6 +1544,25 @@ dependencies = [
  "anyhow",
  "async-trait",
  "directories",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "reqwest-middleware",
+ "reqwest-retry",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "tapir-ai"
+version = "0.1.0"
+source = "git+https://github.com/tapir-dev/tapir?rev=f09cb68#f09cb680fc974bebf77668cf673faa59abc3bc96"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "etcetera",
  "eventsource-stream",
  "futures",
  "reqwest",
@@ -1606,7 +1635,27 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
- "tapir-ai",
+ "tapir-ai 0.1.0 (git+https://github.com/tapir-dev/tapir?rev=1f7849f)",
+ "tokio",
+]
+
+[[package]]
+name = "tapir-core"
+version = "0.1.0"
+source = "git+https://github.com/tapir-dev/tapir?rev=f09cb68#f09cb680fc974bebf77668cf673faa59abc3bc96"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "etcetera",
+ "futures",
+ "globset",
+ "grep",
+ "ignore",
+ "serde",
+ "serde_json",
+ "similar",
+ "tapir-ai 0.1.0 (git+https://github.com/tapir-dev/tapir?rev=f09cb68)",
  "tokio",
 ]
 
@@ -1617,7 +1666,7 @@ source = "git+https://github.com/tapir-dev/tapir-sandbox?rev=ff627fb#ff627fb8f24
 dependencies = [
  "anyhow",
  "async-trait",
- "tapir-core",
+ "tapir-core 0.1.0 (git+https://github.com/tapir-dev/tapir?rev=1f7849f)",
  "tokio",
 ]
 
