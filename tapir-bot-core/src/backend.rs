@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::engine::Engine;
-use crate::event::Inbound;
+use crate::event::{Inbound, ReactionEvent};
 
 /// A hook for observing the backend's lifecycle — connection health, message
 /// flow, and turn outcomes — so a consumer can emit metrics (Prometheus, …) or
@@ -37,6 +37,13 @@ pub trait BackendObserver: Send + Sync {
     /// A turn finished. `ok` is false when it errored.
     fn turn_finished(&self, inbound: &Inbound, ok: bool) {
         let _ = (inbound, ok);
+    }
+    /// An emoji reaction was added to a message. The seam for using reactions
+    /// as signals (approvals, acks): the consumer decides what it means. Like
+    /// the others, this runs on the backend's read loop — do no slow work
+    /// (hand the reaction to a queue/task and return).
+    fn reaction(&self, reaction: &ReactionEvent) {
+        let _ = reaction;
     }
 }
 
@@ -73,13 +80,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::event::Inbound;
+    use crate::event::{Inbound, ReactionEvent};
 
     #[derive(Default)]
     struct Counter {
         received: AtomicUsize,
         denied: AtomicUsize,
         turns_ok: AtomicUsize,
+        reactions: AtomicUsize,
     }
 
     impl BackendObserver for Counter {
@@ -93,6 +101,9 @@ mod tests {
             if ok {
                 self.turns_ok.fetch_add(1, Ordering::Relaxed);
             }
+        }
+        fn reaction(&self, _reaction: &ReactionEvent) {
+            self.reactions.fetch_add(1, Ordering::Relaxed);
         }
         // connected / reconnecting are left as the default no-ops.
     }
@@ -122,8 +133,19 @@ mod tests {
         observer.denied(&inbound());
         observer.turn_finished(&inbound(), true);
         observer.turn_finished(&inbound(), false);
+        observer.reaction(&reaction());
         assert_eq!(counter.received.load(Ordering::Relaxed), 1);
         assert_eq!(counter.denied.load(Ordering::Relaxed), 1);
         assert_eq!(counter.turns_ok.load(Ordering::Relaxed), 1, "only the ok turn counts");
+        assert_eq!(counter.reactions.load(Ordering::Relaxed), 1);
+    }
+
+    fn reaction() -> ReactionEvent {
+        ReactionEvent {
+            channel: "C".into(),
+            ts: "1".into(),
+            user: "U".into(),
+            reaction: "thumbsup".into(),
+        }
     }
 }

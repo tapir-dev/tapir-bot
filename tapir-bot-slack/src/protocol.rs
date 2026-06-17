@@ -4,16 +4,19 @@
 //! whole protocol run against synthetic payloads in tests.
 
 use serde::Deserialize;
-use tapir_bot_core::event::Inbound;
+use tapir_bot_core::event::{Inbound, ReactionEvent};
 
 /// What one frame asks of the connection. Most frames set a single field; an
-/// `events_api` envelope carrying a mention sets both `ack` and `inbound`.
+/// `events_api` envelope carrying a mention sets both `ack` and `inbound`, and
+/// one carrying a reaction sets both `ack` and `reaction`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Decision {
     /// The envelope id to acknowledge, if the frame was an ackable envelope.
     pub ack: Option<String>,
     /// The mention to hand the bot, if the envelope carried one.
     pub inbound: Option<Inbound>,
+    /// The reaction to surface, if the envelope carried a `reaction_added`.
+    pub reaction: Option<ReactionEvent>,
     /// Whether Slack asked us to drop this socket and open a fresh one.
     pub reconnect: bool,
 }
@@ -43,6 +46,17 @@ struct Event {
     text: Option<String>,
     ts: Option<String>,
     thread_ts: Option<String>,
+    /// The emoji name on a `reaction_added` event (no colons).
+    reaction: Option<String>,
+    /// The message a `reaction_added` event points at.
+    item: Option<ReactionItem>,
+}
+
+/// The `item` of a `reaction_added` event: the message that was reacted to.
+#[derive(Deserialize)]
+struct ReactionItem {
+    channel: Option<String>,
+    ts: Option<String>,
 }
 
 /// Decide what one text frame off the Socket Mode WebSocket asks of the
@@ -57,10 +71,16 @@ pub fn handle_frame(frame: &str) -> Decision {
         // A disconnect carries no envelope id and needs no ack — just reopen.
         "disconnect" => decision.reconnect = true,
         // The Events API: ack always (Slack redelivers otherwise), and deliver
-        // the mention if that is what it carried.
+        // what the envelope carried — a mention/message turn, or a reaction.
         "events_api" => {
             decision.ack = envelope.envelope_id;
-            decision.inbound = envelope.payload.and_then(|p| p.event).and_then(inbound_from_event);
+            if let Some(event) = envelope.payload.and_then(|p| p.event) {
+                if event.kind == "reaction_added" {
+                    decision.reaction = reaction_from_event(event);
+                } else {
+                    decision.inbound = inbound_from_event(event);
+                }
+            }
         }
         // `hello` is informational; everything else we ack and drop.
         "hello" => {}
@@ -100,6 +120,19 @@ fn inbound_from_event(event: Event) -> Option<Inbound> {
         is_bot: event.bot_id.is_some(),
         is_dm,
         continuation: is_channel_reply,
+    })
+}
+
+/// Turn a `reaction_added` event into a [`ReactionEvent`]. Needs the reacted
+/// message's channel and `ts` (from `item`); a reaction on anything other than
+/// a message (no `item.channel`/`item.ts`) becomes `None`.
+fn reaction_from_event(event: Event) -> Option<ReactionEvent> {
+    let item = event.item?;
+    Some(ReactionEvent {
+        channel: item.channel?,
+        ts: item.ts?,
+        user: event.user.unwrap_or_default(),
+        reaction: event.reaction.unwrap_or_default(),
     })
 }
 
@@ -274,6 +307,48 @@ mod tests {
             } }
         }"#;
         assert!(handle_frame(frame).inbound.is_none());
+    }
+
+    #[test]
+    fn a_reaction_added_is_acked_and_surfaced() {
+        let frame = r#"{
+            "type": "events_api",
+            "envelope_id": "env-r",
+            "payload": { "event": {
+                "type": "reaction_added", "user": "U1", "reaction": "white_check_mark",
+                "item": { "type": "message", "channel": "C1", "ts": "100.1" }
+            } }
+        }"#;
+        let d = handle_frame(frame);
+        assert_eq!(d.ack.as_deref(), Some("env-r"));
+        assert!(d.inbound.is_none(), "a reaction is not a turn");
+        let reaction = d.reaction.expect("a reaction is surfaced");
+        assert_eq!(
+            reaction,
+            ReactionEvent {
+                channel: "C1".into(),
+                ts: "100.1".into(),
+                user: "U1".into(),
+                reaction: "white_check_mark".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_reaction_on_a_non_message_item_is_acked_but_dropped() {
+        // A reaction on a file (no item channel/ts) is acked but not surfaced.
+        let frame = r#"{
+            "type": "events_api",
+            "envelope_id": "env-rf",
+            "payload": { "event": {
+                "type": "reaction_added", "user": "U1", "reaction": "eyes",
+                "item": { "type": "file", "file": "F1" }
+            } }
+        }"#;
+        let d = handle_frame(frame);
+        assert_eq!(d.ack.as_deref(), Some("env-rf"));
+        assert!(d.reaction.is_none(), "no message coordinates, nothing to surface");
+        assert!(d.inbound.is_none());
     }
 
     #[test]

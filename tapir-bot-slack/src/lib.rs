@@ -200,6 +200,12 @@ async fn run_one_connection(
             }
         }
 
+        // A reaction is a signal, not a turn: surface it to the observer (which
+        // queues it) and move on. The engine never acts on it directly.
+        if let Some(reaction) = decision.reaction {
+            notify(observer, |o| o.reaction(&reaction));
+        }
+
         if decision.reconnect {
             break;
         }
