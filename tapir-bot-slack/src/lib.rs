@@ -18,6 +18,8 @@ use anyhow::Context;
 use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
+use tokio::sync::mpsc;
+
 use tapir_bot_core::access::{Access, LoopGuard};
 use tapir_bot_core::backend::TURN_FAILED_MESSAGE;
 use tapir_bot_core::event::Inbound;
@@ -26,6 +28,30 @@ use tapir_bot_core::{BackendObserver, ChatBackend, Engine, ReplySink};
 use client::Client;
 
 pub use config::{Denial, Reactions, SlackConfig};
+
+/// An action a consumer asks the running backend to perform in a thread,
+/// initiated *outside* the Slack read loop — e.g. from a webhook handler.
+/// Send these through the channel returned by [`SlackBackend::injector`].
+///
+/// This is the seam for an event-driven consumer: a webhook arrives, and the
+/// consumer posts a status message or runs an agent turn in a Slack thread
+/// without a user message having triggered it.
+pub enum Injected {
+    /// Post `text` (markdown) as a message into `channel`'s `thread`.
+    Post {
+        channel: String,
+        thread: String,
+        text: String,
+    },
+    /// Run an agent turn from `prompt`, streaming the reply into `channel`'s
+    /// `thread`. The prompt drives the agent (with its skills) exactly like a
+    /// user message would; the prompt text itself is not posted.
+    Turn {
+        channel: String,
+        thread: String,
+        prompt: String,
+    },
+}
 
 /// How long to wait before reopening after a failed connection, so a
 /// persistent failure (bad token, Slack outage) does not spin.
@@ -61,13 +87,16 @@ pub struct SlackBackend {
     ///
     /// [`access_handle`]: SlackBackend::access_handle
     access: Arc<RwLock<Access>>,
+    /// The receiver for consumer-initiated [`Injected`] actions, set by
+    /// [`injector`](SlackBackend::injector). `None` until requested.
+    injected: Option<mpsc::Receiver<Injected>>,
 }
 
 impl SlackBackend {
     /// Build the backend from the two Slack tokens and the Slack config.
     pub fn new(app_token: String, bot_token: String, config: SlackConfig) -> Self {
         let access = Arc::new(RwLock::new(config.access.clone()));
-        Self { app_token, bot_token, config, observer: None, access }
+        Self { app_token, bot_token, config, observer: None, access, injected: None }
     }
 
     /// Build the backend from the environment: `SLACK_APP_TOKEN` (`xapp-…`) and
@@ -96,6 +125,18 @@ impl SlackBackend {
     pub fn access_handle(&self) -> Arc<RwLock<Access>> {
         Arc::clone(&self.access)
     }
+
+    /// Open the injection channel and return its sender, so a consumer can post
+    /// messages or run agent turns in threads from outside the read loop (see
+    /// [`Injected`]). Call this before [`ChatBackend::run`] consumes the
+    /// backend; the returned sender is `Clone` and works across reconnects.
+    /// Calling it again replaces the channel (the previous sender then stops
+    /// being serviced).
+    pub fn injector(&mut self) -> mpsc::Sender<Injected> {
+        let (tx, rx) = mpsc::channel(64);
+        self.injected = Some(rx);
+        tx
+    }
 }
 
 #[async_trait::async_trait]
@@ -121,6 +162,20 @@ impl ChatBackend for SlackBackend {
                     "access policy is empty — the bot will respond to nothing; configure [access]"
                 );
             }
+        }
+
+        // Service consumer-initiated actions (posts / agent turns) on their own
+        // task, independent of the socket's connect/reconnect cycle. Injected
+        // actions are trusted (they come from the embedding app, not the wire),
+        // so they bypass the access policy.
+        if let Some(receiver) = self.injected {
+            tokio::spawn(serve_injected(
+                receiver,
+                Arc::clone(&client),
+                Arc::clone(&engine),
+                observer.clone(),
+                bot_user_id.clone(),
+            ));
         }
 
         // Reconnect forever: Slack refreshes the socket roughly hourly, and a
@@ -268,6 +323,57 @@ async fn handle_inbound(
         }
     }
     notify(observer, |o| o.turn_finished(inbound, ok));
+}
+
+/// Drain the [`Injected`] channel, performing each action in the target thread:
+/// a `Post` is a one-shot message; a `Turn` runs the engine and streams the
+/// reply. Runs until the sender is dropped. Injected actions are trusted, so
+/// they skip the access policy; a failed turn still posts the failure note.
+async fn serve_injected(
+    mut receiver: mpsc::Receiver<Injected>,
+    client: Arc<Client>,
+    engine: Arc<Engine>,
+    observer: Option<Arc<dyn BackendObserver>>,
+    bot_user_id: String,
+) {
+    while let Some(action) = receiver.recv().await {
+        match action {
+            Injected::Post { channel, thread, text } => {
+                let mut sink = SlackReply::new(&client, channel, thread);
+                if let Err(error) = sink.update(&text, true).await {
+                    tracing::warn!(error = format!("{error:#}"), "an injected post failed");
+                }
+            }
+            Injected::Turn { channel, thread, prompt } => {
+                let inbound = injected_inbound(&channel, &thread, &prompt, &bot_user_id);
+                let mut sink = SlackReply::new(&client, channel.clone(), thread.clone());
+                let result = engine.handle(&bot_user_id, &inbound, &mut sink).await;
+                let ok = result.is_ok();
+                if let Err(error) = result {
+                    tracing::warn!(error = format!("{error:#}"), "an injected turn failed");
+                    let mut sink = SlackReply::new(&client, channel, thread);
+                    let _ = sink.update(TURN_FAILED_MESSAGE, true).await;
+                }
+                notify(&observer, |o| o.turn_finished(&inbound, ok));
+            }
+        }
+    }
+}
+
+/// Build the synthetic [`Inbound`] for an injected turn: authored by the bot,
+/// carrying `prompt` as its text, targeting `thread` in `channel`. It never
+/// passes through the access policy (the caller is the trusted embedding app).
+fn injected_inbound(channel: &str, thread: &str, prompt: &str, bot_user_id: &str) -> Inbound {
+    Inbound {
+        channel: channel.to_string(),
+        ts: thread.to_string(),
+        thread: thread.to_string(),
+        user: bot_user_id.to_string(),
+        text: prompt.to_string(),
+        is_bot: false,
+        is_dm: false,
+        continuation: false,
+    }
 }
 
 /// Call `f` with the observer when one is set; a no-op otherwise. Keeps the
@@ -516,6 +622,18 @@ mod tests {
     fn a_present_env_token_is_trimmed() {
         let tok = require_env_token("SLACK_BOT_TOKEN", Some(" xoxb-1 \n".into())).unwrap();
         assert_eq!(tok, "xoxb-1");
+    }
+
+    #[test]
+    fn an_injected_turn_targets_the_thread_and_carries_the_prompt() {
+        use super::injected_inbound;
+        let inbound = injected_inbound("C1", "100.1", "Run the spec phase.", BOT);
+        assert_eq!(inbound.channel, "C1");
+        assert_eq!(inbound.thread, "100.1", "the reply targets the given thread");
+        assert_eq!(inbound.ts, "100.1");
+        assert_eq!(inbound.user, BOT, "authored by the bot itself");
+        assert_eq!(inbound.text, "Run the spec phase.");
+        assert!(!inbound.is_bot && !inbound.is_dm && !inbound.continuation);
     }
 
     #[test]
