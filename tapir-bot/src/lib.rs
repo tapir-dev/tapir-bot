@@ -27,7 +27,7 @@ use tapir_bot_core::Engine;
 
 pub use tapir_bot_core::{
     self as core, ChatBackend, CommandContext, CommandHandler, CommandOutcome, CommandSpec, Config,
-    Inbound, ReplySink, Skill, config,
+    Inbound, ReactionEvent, ReplySink, Skill, config,
 };
 
 /// The Slack backend, re-exported when the `slack` feature is on (default).
