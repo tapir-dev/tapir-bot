@@ -32,5 +32,5 @@ pub use backend::{BackendObserver, ChatBackend, ReplySink};
 pub use commands::{CommandContext, CommandHandler, CommandOutcome, CommandSpec};
 pub use config::Config;
 pub use engine::{AgentSettings, Engine};
-pub use event::Inbound;
+pub use event::{Inbound, ReactionEvent};
 pub use tools::{Skill, Tools};
