@@ -11,7 +11,7 @@ mod config;
 mod protocol;
 mod render;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -55,12 +55,19 @@ pub struct SlackBackend {
     config: SlackConfig,
     /// Optional lifecycle observer (metrics/logging).
     observer: Option<Arc<dyn BackendObserver>>,
+    /// The live access policy, seeded from `config.access`. Held behind a lock
+    /// so a consumer can swap it at runtime (see [`access_handle`]); the read
+    /// loop re-reads it per event.
+    ///
+    /// [`access_handle`]: SlackBackend::access_handle
+    access: Arc<RwLock<Access>>,
 }
 
 impl SlackBackend {
     /// Build the backend from the two Slack tokens and the Slack config.
     pub fn new(app_token: String, bot_token: String, config: SlackConfig) -> Self {
-        Self { app_token, bot_token, config, observer: None }
+        let access = Arc::new(RwLock::new(config.access.clone()));
+        Self { app_token, bot_token, config, observer: None, access }
     }
 
     /// Build the backend from the environment: `SLACK_APP_TOKEN` (`xapp-…`) and
@@ -77,6 +84,18 @@ impl SlackBackend {
         self.observer = Some(observer);
         self
     }
+
+    /// A handle to the live access policy, for changing who the bot answers
+    /// without a restart. Replace it through the lock — e.g.
+    /// `*backend.access_handle().write().unwrap() = new_access;` — and the read
+    /// loop picks it up on the next event. Take the handle before
+    /// [`ChatBackend::run`] consumes the backend.
+    ///
+    /// Note: the per-turn loop cap (`access.bot_turn_limit`) is read once at
+    /// startup; only the allowlist (channels/dm/bots) is re-read live.
+    pub fn access_handle(&self) -> Arc<RwLock<Access>> {
+        Arc::clone(&self.access)
+    }
 }
 
 #[async_trait::async_trait]
@@ -87,16 +106,21 @@ impl ChatBackend for SlackBackend {
         tracing::info!(%bot_user_id, "connected to Slack");
 
         // The Slack backend owns the access policy and the bot loop cap (their
-        // config is Slack-side); it passes them to the engine per event.
-        let access = self.config.access;
+        // config is Slack-side); it passes them to the engine per event. The
+        // policy lives behind a lock so a consumer can swap it at runtime; the
+        // loop cap is fixed at startup.
+        let access = self.access;
         let reactions = Arc::new(self.config.reactions);
         let denial = Arc::new(self.config.denial);
         let observer = self.observer;
-        let mut loop_guard = LoopGuard::new(access.bot_turn_limit);
-        if access.channels.is_empty() && access.dm.users.is_empty() && !access.allow_bots {
-            tracing::warn!(
-                "access policy is empty — the bot will respond to nothing; configure [access]"
-            );
+        let mut loop_guard = LoopGuard::new(access.read().unwrap().bot_turn_limit);
+        {
+            let a = access.read().unwrap();
+            if a.channels.is_empty() && a.dm.users.is_empty() && !a.allow_bots {
+                tracing::warn!(
+                    "access policy is empty — the bot will respond to nothing; configure [access]"
+                );
+            }
         }
 
         // Reconnect forever: Slack refreshes the socket roughly hourly, and a
@@ -139,7 +163,7 @@ impl ChatBackend for SlackBackend {
 async fn run_one_connection(
     client: &Arc<Client>,
     engine: &Arc<Engine>,
-    access: &Access,
+    access: &Arc<RwLock<Access>>,
     loop_guard: &mut LoopGuard,
     reactions: &Arc<Reactions>,
     denial: &Arc<Denial>,
@@ -174,7 +198,10 @@ async fn run_one_connection(
         // the read loop so the socket keeps being polled (Slack's pings get
         // answered) while the model thinks.
         if let Some(inbound) = decision.inbound {
-            let admitted = engine.should_handle(access, loop_guard, bot_user_id, &inbound).await;
+            // Snapshot the live policy for this event (a consumer may have
+            // swapped it). Clone so no lock is held across the turn's awaits.
+            let access = access.read().unwrap().clone();
+            let admitted = engine.should_handle(&access, loop_guard, bot_user_id, &inbound).await;
             notify(observer, |o| o.received(&inbound, admitted));
             if admitted {
                 let client = Arc::clone(client);
@@ -186,7 +213,7 @@ async fn run_one_connection(
                     handle_inbound(&client, &engine, &reactions, &observer, &bot_user_id, &inbound)
                         .await;
                 });
-            } else if denied_when_addressed(&inbound, bot_user_id, access) {
+            } else if denied_when_addressed(&inbound, bot_user_id, &access) {
                 // A non-allowed user addressed the bot: record the denial and,
                 // if a message is configured, tell them (ephemerally), off the
                 // read loop.
@@ -489,5 +516,18 @@ mod tests {
     fn a_present_env_token_is_trimmed() {
         let tok = require_env_token("SLACK_BOT_TOKEN", Some(" xoxb-1 \n".into())).unwrap();
         assert_eq!(tok, "xoxb-1");
+    }
+
+    #[test]
+    fn the_access_handle_swaps_the_live_policy() {
+        use super::SlackBackend;
+        let backend =
+            SlackBackend::new("xapp-1".into(), "xoxb-1".into(), crate::SlackConfig::default());
+        let handle = backend.access_handle();
+        assert!(handle.read().unwrap().dm.users.is_empty(), "seeded from default (deny-all)");
+        // A consumer swaps the policy at runtime.
+        *handle.write().unwrap() =
+            Access { dm: DmAccess { users: vec!["U1".into()] }, ..Access::default() };
+        assert_eq!(handle.read().unwrap().dm.users, vec!["U1"], "the live policy reflects the swap");
     }
 }
